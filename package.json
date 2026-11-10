@@ -1,0 +1,13 @@
+{
+  "name": "kigenocr",
+  "version": "0.2.0",
+  "description": "Tiny dependency-free OCR for best-before / use-by dates on product packaging",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "test": "node web/test-parse.mjs && node web/test-model.mjs"
+  },
+  "devDependencies": {
+    "jpeg-js": "^0.4.4"
+  }
+}

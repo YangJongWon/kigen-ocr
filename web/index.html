@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>期限スキャン</title>
+<style>
+  :root { --bg:#0e0f11; --fg:#f2f2f2; --mut:#9aa0a6; --acc:#ffcc33; --ok:#3ddc84; --card:#1b1d21; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, "Hiragino Sans", "Yu Gothic UI", sans-serif; }
+  header { display:flex; gap:8px; padding:12px 16px; align-items:center; }
+  header h1 { font-size:16px; margin:0; flex:1; }
+  button, label.btn { background:var(--card); color:var(--fg); border:1px solid #333; border-radius:8px; padding:8px 12px; font:inherit; cursor:pointer; }
+  #stage { position:relative; margin:0 16px; border-radius:12px; overflow:hidden; background:#000; touch-action:none; }
+  #stage video, #stage canvas.view { display:block; width:100%; height:auto; }
+  #guide { position:absolute; border:2px solid var(--acc); border-radius:6px; box-shadow:0 0 0 2000px rgba(0,0,0,.45); pointer-events:none; }
+  #guide.ok { border-color:var(--ok); }
+  #hint { position:absolute; left:0; right:0; bottom:8px; text-align:center; color:#ddd; font-size:13px; text-shadow:0 1px 2px #000; }
+  #result { margin:16px; padding:16px; background:var(--card); border-radius:12px; min-height:110px; }
+  #date { font-size:32px; font-weight:700; letter-spacing:.02em; }
+  #kind { color:var(--acc); font-weight:600; }
+  .mut { color:var(--mut); font-size:13px; }
+  #dbg { display:block; margin-top:8px; image-rendering:pixelated; max-width:100%; background:#fff; }
+</style>
+</head>
+<body>
+<header>
+  <h1>期限スキャン</h1>
+  <button id="camBtn">カメラ</button>
+  <label class="btn">画像<input id="file" type="file" accept="image/*" hidden></label>
+</header>
+<div id="stage">
+  <video id="video" playsinline muted hidden></video>
+  <canvas id="view" class="view" hidden></canvas>
+  <div id="guide" hidden></div>
+  <div id="hint">モデル読み込み中…</div>
+</div>
+<div id="result">
+  <div><span id="kind"></span></div>
+  <div id="date">—</div>
+  <div id="raw" class="mut"></div>
+  <div id="alt" class="mut"></div>
+  <canvas id="dbg" height="32" width="1"></canvas>
+</div>
+<script type="module">
+import { loadModel, readRegion } from "./kigen-ocr.js";
+
+const $ = (id) => document.getElementById(id);
+const video = $("video"), view = $("view"), guide = $("guide"), hint = $("hint");
+let model, mode = null, stream = null, sel = null, lastIso = null, streak = 0;
+
+model = await loadModel("kigen.bin");
+hint.textContent = "「カメラ」または「画像」を選んでください";
+
+function show(r, ms) {
+  $("kind").textContent = r?.date?.kind || "";
+  if (r?.date) {
+    const d = r.date;
+    const tag = d.precision === "day" ? "" : d.precision === "dekad" ? `（${d.part}旬 → ${d.latest}まで）` : `（月まで → ${d.latest}）`;
+    $("date").textContent = d.iso + (d.time ? ` ${d.time}` : "") + tag;
+    $("alt").textContent = d.alternatives?.length ? `他の解釈: ${d.alternatives.join(", ")}（${d.order}と判断）` : `順序: ${d.order}`;
+  } else {
+    $("date").textContent = "—";
+    // strict mode dropped a doubtful reading: never show it as the answer
+    $("alt").textContent = r?.rejected ? `読み取りが不確かです（${r.rejected.date.iso}?）— 日付の行だけを枠に入れて撮り直してください` : "";
+  }
+  const extra = r ? [r.lines?.length > 1 ? `${r.lines.length}行` : "", Math.abs(r.skew || 0) >= 3 ? `傾き補正 ${r.skew}°` : "", r.turn ? `${r.turn}°回転して読取` : ""].filter(Boolean).join("  ") : "";
+  $("raw").textContent = r ? `読取: ${r.text || "(なし)"}  信頼度 ${(r.conf * 100).toFixed(0)}%  ${ms.toFixed(0)}ms  ${extra}` : "";
+}
+
+function drawDebug(r) { // the exact 32px line the model read (after straightening and cropping)
+  const inp = r.input;
+  if (!inp) return;
+  const c = $("dbg"), ctx = c.getContext("2d");
+  c.width = inp.w; c.height = 32;
+  const id = ctx.createImageData(inp.w, 32);
+  for (let i = 0; i < inp.x.length; i++) { const v = inp.x[i] * 255; id.data.set([v, v, v, 255], i * 4); }
+  ctx.putImageData(id, 0, 0);
+}
+
+function grab(src, sw, sh, box) { // box in source pixels
+  const c = document.createElement("canvas");
+  const scale = Math.min(1, 160 / box.h); // keep crops small: text ends up 32px high anyway
+  c.width = Math.max(8, Math.round(box.w * scale)); c.height = Math.max(8, Math.round(box.h * scale));
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(src, box.x, box.y, box.w, box.h, 0, 0, c.width, c.height);
+  return ctx.getImageData(0, 0, c.width, c.height);
+}
+
+function run(img) {
+  const t = performance.now();
+  const r = readRegion(model, img);
+  const ms = performance.now() - t;
+  drawDebug(r);
+  return [r, ms];
+}
+
+// The camera frame is ~4.5:1, so a line tilted more than ~10° no longer fits in it.
+const HINT_CAM = "日付を枠に合わせてください";
+function tiltHint(r) {
+  if (mode !== "cam") return;
+  const a = Math.round(Math.abs(r.skew || 0));
+  hint.textContent = a >= 8 ? `${a}° 傾いています — 日付の行を枠と平行にしてください` : HINT_CAM;
+}
+
+// ---------------- camera
+function layoutGuide() {
+  const W = $("stage").clientWidth, H = $("stage").clientHeight;
+  const w = W * 0.86, h = Math.min(H * 0.3, w / 4.5);
+  Object.assign(guide.style, { left: `${(W - w) / 2}px`, top: `${(H - h) / 2}px`, width: `${w}px`, height: `${h}px` });
+}
+
+async function scanLoop() {
+  if (mode !== "cam") return;
+  if (video.readyState >= 2) {
+    const vw = video.videoWidth, vh = video.videoHeight, k = vw / $("stage").clientWidth;
+    const gx = guide.offsetLeft * k, gy = guide.offsetTop * k, gw = guide.offsetWidth * k, gh = guide.offsetHeight * k;
+    const [r, ms] = run(grab(video, vw, vh, { x: gx, y: gy, w: gw, h: gh }));
+    tiltHint(r);
+    const iso = r.date?.iso;
+    streak = iso && iso === lastIso ? streak + 1 : 0;
+    lastIso = iso;
+    if (streak >= 2) { show(r, ms); guide.classList.add("ok"); if (streak === 2) navigator.vibrate?.(60); }
+    else { guide.classList.remove("ok"); if (!$("date").dataset.locked) show(r, ms); }
+  }
+  setTimeout(scanLoop, 120);
+}
+
+$("camBtn").onclick = async () => {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
+  } catch (e) { hint.textContent = "カメラを使えません: " + e.message; return; }
+  mode = "cam"; view.hidden = true; video.hidden = false; guide.hidden = false;
+  video.srcObject = stream; await video.play();
+  layoutGuide();
+  hint.textContent = HINT_CAM;
+  scanLoop();
+};
+addEventListener("resize", () => mode === "cam" && layoutGuide());
+
+// ---------------- image + drag selection
+let bmp = null;
+$("file").onchange = async (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  stream?.getTracks().forEach((t) => t.stop());
+  mode = "img"; video.hidden = true; guide.hidden = true; view.hidden = false;
+  bmp = await createImageBitmap(f);
+  view.width = bmp.width; view.height = bmp.height;
+  view.getContext("2d").drawImage(bmp, 0, 0);
+  hint.textContent = "日付の部分をドラッグで囲んでください";
+};
+function pt(e) { const r = view.getBoundingClientRect(), k = view.width / r.width; return [(e.clientX - r.left) * k, (e.clientY - r.top) * k]; }
+view.addEventListener("pointerdown", (e) => { if (mode !== "img") return; sel = { x0: pt(e)[0], y0: pt(e)[1] }; view.setPointerCapture(e.pointerId); });
+view.addEventListener("pointermove", (e) => {
+  if (!sel) return;
+  [sel.x1, sel.y1] = pt(e);
+  const ctx = view.getContext("2d");
+  ctx.drawImage(bmp, 0, 0);
+  ctx.strokeStyle = "#ffcc33"; ctx.lineWidth = Math.max(2, view.width / 400);
+  ctx.strokeRect(sel.x0, sel.y0, sel.x1 - sel.x0, sel.y1 - sel.y0);
+});
+view.addEventListener("pointerup", () => {
+  if (!sel || sel.x1 == null) { sel = null; return; }
+  const box = { x: Math.min(sel.x0, sel.x1), y: Math.min(sel.y0, sel.y1), w: Math.abs(sel.x1 - sel.x0), h: Math.abs(sel.y1 - sel.y0) };
+  sel = null;
+  if (box.w < 10 || box.h < 6) return;
+  const [r, ms] = run(grab(bmp, bmp.width, bmp.height, box));
+  show(r, ms);
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+# environments / tools
+.venv/
+__pycache__/
+node_modules/
+.claude/
+
+# third-party data: license not settled, evaluation only — do not publish
+datasets/
+
+# training outputs and logs (publish only web/kigen.bin)
+*.pt
+*.log
+samples/
+*.zip
+web/kigen_*.bin
+web/fixture_*.json
