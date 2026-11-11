@@ -186,9 +186,14 @@ const strictCases = [
   ["10.08", null],                       // 2-digit-year YM far from today (2010-08): doubtful
   ["99.12", null],
   ["2022.01.", null],                     // day cut off: not "January 2022"
-  ["2021.11.17I", null],
+  ["2021.11.17I", "2021-11-17"],          // letter after a 2-digit day: a glued digit could not make it another date
   ["10:19/12/2021", null],                // left part eaten as a time
   ["H05.05.2022", null],                  // only "05.2022" is readable: cut-off
+  ["X2023.01.13", "2023-01-13"],          // label border read as a letter before a 4-digit year
+  ["2022.07.27B", "2022-07-27"],
+  ["15/03/2022X", "2022-03-15"],
+  ["X15/03/2022", null],                  // short first field after a letter: maybe a code tail
+  ["LOT2023.01.13", null],
   ["7/2/10", null],                       // 令7/2/10 with the era lost, not 2010-02-07
   ["8.3.31", null],
   ["115.03.31", null],                    // bare 3-digit year without a Taiwanese label: broken year?

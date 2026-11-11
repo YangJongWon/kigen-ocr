@@ -1003,6 +1003,16 @@ function findCandidates(s, kind, today, hasTime, taiwan = false, foreign = false
       if (a.length <= 2) add(inferYear(+a, +b, today), +a, +b, "MD", hasTime ? 4 : 0.5, !hasTime);
     }
   }
+  // a complete date with a 4-digit year and one separator kind, with a single letter glued to an
+  // end ("X2023.01.13", "2022.07.27B", "15/03/2022X": label border or lot code read into the
+  // line). Only next to a field that a glued digit could not extend into a valid date (4-digit
+  // year, 2-digit day), so a letter that was really a digit cannot change the date. A short
+  // first field after a letter ("H05.05.2022") may be the tail of a code: not taken.
+  for (m of s.matchAll(/(?<![\dA-Z])([A-Z]?)(\d{4})([.\/\-])(\d{1,2})\3(\d{2}|\d(?![A-Z]))([A-Z]?)(?![\dA-Z])/g))
+    if (m[1] || m[6]) add(+m[2], +m[4], +m[5], "YMD", P.YMD + 0.5);
+  for (m of s.matchAll(/(?<![\dA-Z])(\d{1,2})([.\/\-])(\d{1,2})\2(\d{4})[A-Z](?![\dA-Z])/g)) {
+    add(+m[4], +m[3], +m[1], "DMY", P.DMY); add(+m[4], +m[1], +m[3], "MDY", P.MDY);
+  }
   // MM.YYYY
   for (m of s.matchAll(/(?<!\d)(\d{1,2})[.\/\-](\d{4})(?!\d)/g))
     add(+m[2], +m[1], null, "MY", 2, /[.\/\-]/.test(s[m.index - 1] ?? "") || /[.\/\-]/.test(s[m.index + m[0].length] ?? ""));
