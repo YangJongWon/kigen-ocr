@@ -100,7 +100,7 @@ ML_P = 0.3  # share of non-Japanese lines (Korean, Chinese, Taiwan, South-East A
 THAI_MFG, THAI_EXP, THAI_BB = "ผลิต", "หมดอายุ", "ควรบริโภคก่อน"
 
 
-def ml_text():
+def ml_text(lang=None):
     """Date lines as printed in Korea, China, Taiwan, Thailand, Vietnam, Indonesia/Malaysia.
 
     Returns (visual, label). Thai script is drawn but not in the vocabulary: it is left out of
@@ -109,7 +109,8 @@ def ml_text():
     p, yy = random.random() < 0.8, f"{y % 100:02d}"
     lot = (" " + rand_code()) if random.random() < 0.2 else ""
     thai = ""
-    lang = random.choices(["kr", "cn", "tw", "th", "vn", "id"], [4, 3, 1.5, 1, 1, 1])[0]
+    # Taiwan and Thailand read worst in the per-country check: weighted up
+    lang = lang or random.choices(["kr", "cn", "tw", "th", "vn", "id"], [4, 3, 2.5, 2.5, 1, 1])[0]
     if lang == "kr":
         # 소비기한 is the norm since 2024 (유통기한 on older / imported stock): "소비기한 2026.03.31까지"
         f = random.random()
