@@ -242,7 +242,7 @@ export function recognize(model, x, w) {
   }
   // a: (V,T) logits -> greedy CTC
   const V = C, T = W, vocab = model.vocab;
-  const ch = [], pr = [];
+  const ch = [], pr = [], ps = [];
   let prev = 0, confSum = 0, n = 0, minConf = 1;
   // argmax per time step, scanning the (V, T) logits row by row (contiguous reads)
   const bestV = new Int32Array(T), bestL = a.slice(0, T);
@@ -256,18 +256,19 @@ export function recognize(model, x, w) {
       let sum = 0;
       for (let v = 0; v < V; v++) sum += Math.exp(a[v * T + t] - bv);
       const p = 1 / sum;
-      ch.push(vocab[best]); pr.push(p); confSum += p; n++; if (p < minConf) minConf = p;
+      ch.push(vocab[best]); pr.push(p); ps.push((t + 0.5) / T); confSum += p; n++; if (p < minConf) minConf = p;
     }
     prev = best;
   }
-  // collapse whitespace; probs[i] stays aligned with [...text][i]
+  // collapse whitespace; probs[i] / pos[i] stay aligned with [...text][i]
+  // (pos = where the character was emitted, as a fraction of the input width)
   let text = "";
-  const probs = [];
+  const probs = [], pos = [];
   for (let i = 0; i < ch.length; i++) {
     if (/\s/.test(ch[i])) { if (!text || /\s/.test(ch[i + 1] ?? " ")) continue; }
-    for (const c of ch[i]) { text += /\s/.test(c) ? " " : c; probs.push(pr[i]); }
+    for (const c of ch[i]) { text += /\s/.test(c) ? " " : c; probs.push(pr[i]); pos.push(ps[i]); }
   }
-  return { text, conf: n ? confSum / n : 0, minConf: n ? minConf : 0, probs };
+  return { text, conf: n ? confSum / n : 0, minConf: n ? minConf : 0, probs, pos };
 }
 
 // ------------------------------------------------------------------ preprocessing
@@ -407,6 +408,59 @@ function textLines(g, w, h) {
   });
 }
 
+// Lines found in vertical strips of a wide box. Over the full width, text blocks at other heights
+// beside the date (lot code, label, graphics) fill the gaps above and below it, and a small tilt
+// left uncorrected (< 3°) smears a line over w * tan(angle) rows; textLines then sees one tall
+// line. In a strip ~2 box heights wide the date line stands on its own. Strips with little ink
+// are skipped (their normalised profile is noise); the strongest few new bands are returned.
+function stripLines(g, w, h, max = 3) {
+  const sw = 2 * h, step = h;
+  if (w < 3 * h) return [];
+  const strips = [];
+  for (let x0 = 0; x0 < w; x0 += step) {
+    const x1 = Math.min(w, x0 + sw);
+    if (x1 - x0 < h) break;
+    const sub = crop(g, w, 0, h, x0, x1), n = x1 - x0;
+    let e = 0;
+    for (let y = 0; y < h; y++) for (let x = 1; x < n; x++) e += Math.abs(sub[y * n + x] - sub[y * n + x - 1]);
+    strips.push({ sub, n, e: e / n });
+    if (x1 === w) break;
+  }
+  const emax = Math.max(0, ...strips.map((s) => s.e)), found = [];
+  for (const s of strips) {
+    if (s.e < 0.35 * emax) continue;
+    const ls = textLines(s.sub, s.n, h);
+    if (ls.length < 2) continue; // one line: the full-width split already has it
+    for (const [a, b] of ls) {
+      let m = 0;
+      for (let y = a; y < b; y++) for (let x = 1; x < s.n; x++) m += Math.abs(s.sub[y * s.n + x] - s.sub[y * s.n + x - 1]);
+      const dup = found.find((f) => Math.abs(f.a - a) + Math.abs(f.b - b) < 0.15 * (b - a));
+      if (dup) dup.m = Math.max(dup.m, m); else found.push({ a, b, m });
+    }
+  }
+  return found.sort((p, q) => q.m - p.m).slice(0, max).map(({ a, b }) => [a, b]);
+}
+
+// Stretch [a, b) of text (as characters) the date is read from, or null: the most precise
+// parse (day > dekad > month), then the most digits ("2021.10.06" over "21.10.06" / "21.10"),
+// then the shortest (no junk at the ends).
+const PREC = { day: 3, dekad: 2, month: 1 };
+function dateSpan(text, strict) {
+  const c = [...text], n = c.length;
+  let best = null, key = null;
+  for (let a = 0; a < n; a++) {
+    if (!/[\dA-Za-z令平]/.test(c[a])) continue;
+    for (let b = a + 4; b <= n; b++) {
+      if (!/[\dA-Za-z日]/.test(c[b - 1])) continue;
+      const s = c.slice(a, b).join(""), d = parseDate(s, { strict });
+      if (!d) continue;
+      const k = [PREC[d.precision] ?? 0, (s.match(/\d/g) || []).length, -(b - a)];
+      if (!key || k[0] > key[0] || (k[0] === key[0] && (k[1] > key[1] || (k[1] === key[1] && k[2] > key[2])))) { best = [a, b]; key = k; }
+    }
+  }
+  return best;
+}
+
 // Horizontal ink extent of rows y0..y1, padded by 0.5 x band height. The model was trained
 // with side margins up to ~1.5 x text height; wide blank areas make it hallucinate ("賞味期限" -> "2").
 function inkCols(g, w, y0, y1) {
@@ -542,7 +596,7 @@ const weak = (r) => !r.date || r.date.order === "MD" || r.conf < 0.6;
 // ("22027/03/31"), yearless "2/8", 2-digit-year "03/31" — and results below opts.minConf.
 // A dropped date is kept in `rejected` ({date, reason}) so the UI can ask for a retake.
 export function readRegion(model, img, opts = {}) {
-  const o = { strict: opts.strict ?? true, minConf: opts.minConf ?? MIN_CONF };
+  const o = { strict: opts.strict ?? true, minConf: opts.minConf ?? MIN_CONF, focus: opts.focus, strips: opts.strips };
   const best = readTurns(model, img, o);
   best.dateConf = best.date ? dateConf(best.text, best.probs, best.date.iso, o.strict) : null;
   // only a manufacturing date was found: never hand it out as the expiry
@@ -555,7 +609,7 @@ export function readRegion(model, img, opts = {}) {
     best.date = null;
   }
   // a digit misread with high confidence ("10.08" -> "10.03") rarely survives a second look
-  if (o.strict && best.date && (opts.recheck ?? RECHECK)) {
+  if (o.strict && best.date && (opts.recheck ?? RECHECK) && !((opts.agree ?? AGREE) && best.agree)) {
     // (a 2-of-3 tie-break with wider framing was tried: +2-9% right dates but up to 2x wrong ones,
     // the third read tends to repeat the first one's misread)
     const again = best.recheck();
@@ -595,6 +649,10 @@ const MIN_CONF = 0.8;
 // second look on by default: on ExpDate photos it cut wrong dates 4.1% -> 1.2% for 1.8% fewer
 // right ones. In camera mode a missed frame is cheap (the next frame retries), a wrong date is not.
 const RECHECK = true;
+const AGREE = true;
+// focus re-read margins left/right of the date characters, in band heights (0.7 on the right:
+// more cut-off dates; 1.0 keeps the right count and fewer wrong)
+const FOCUS_PAD = [0.5, 1.0];
 
 function readTurns(model, img, o) {
   const g = toGray(img), w = img.width, h = img.height;
@@ -626,10 +684,12 @@ function readGray(model, g, w, h, angle, o) {
     for (const l of lines) if (!cands.some(([a, b]) => Math.abs(a - l[0]) + Math.abs(b - l[1]) < 0.15 * (l[1] - l[0]))) cands.push(l);
   let best = null;
   const reads = [];
-  const read = (y0, y1, x0, x1) => {
+  // expect: the read only counts as a date when it gives this one (focus re-reads)
+  const read = (y0, y1, x0, x1, expect) => {
     const inp = toInput(crop(g, w, y0, y1, x0, x1), x1 - x0, y1 - y0, model);
     const r = recognize(model, inp.x, inp.w);
     r.date = parseDate(r.text, { strict: o.strict });
+    if (expect && r.date?.iso !== expect) r.date = null;
     r.band = [y0, y1];
     r.cols = [x0, x1];
     r.input = inp;
@@ -643,6 +703,11 @@ function readGray(model, g, w, h, angle, o) {
   // (stopping at the first confident date was tried: 10-18% faster, but more wrong dates and
   // fewer 賞味/消費 labels on two-line boxes, so every candidate is read)
   for (const [y0, y1] of cands) read(y0, y1, ...inkCols(g, w, y0, y1));
+  // no solid date: look for lines strip by strip (box framed loosely, other text beside the date).
+  // Only then — on boxes that already read well they cost ~25ms and add wrong dates.
+  if (weak(best) && o.strips !== false)
+    for (const l of stripLines(g, w, h))
+      if (!cands.some(([a, b]) => Math.abs(a - l[0]) + Math.abs(b - l[1]) < 0.15 * (l[1] - l[0]))) { cands.push(l); read(l[0], l[1], ...inkCols(g, w, l[0], l[1])); }
   // Junk at a line's ends (label border, cut neighbour glyphs, lot code) turns "2022.09.10"
   // into "22022.09.10" / "2021.11.17I". If no solid date came out, re-read the most confident
   // lines without their outermost ink cluster. Cutting a real part ("25 09 2021" -> "25 09")
@@ -657,6 +722,23 @@ function readGray(model, g, w, h, angle, o) {
       read(y0, y1, x0, R);
       if (cl.length >= 3 && R - L > (y1 - y0)) read(y0, y1, L, R);
       if (!weak(best)) break;
+    }
+  // Focus: with the phone held far away the line also holds other text beside the date, which
+  // gets glued to it ("22021.10.06 BL04"). Find the characters a date parses from, map them back
+  // to x through where the model emitted them, and re-read just that stretch.
+  if (o.focus !== false)
+    for (const r of [...reads].filter((r) => r.pos && /\d{2}/.test(r.text)).sort((p, q) => q.score - p.score).slice(0, 2)) {
+      const sp = dateSpan(r.text, o.strict);
+      if (!sp) continue;
+      const [y0, y1] = r.band, [x0, x1] = r.cols, k = r.input.w * (y1 - y0) / model.h, bh = y1 - y0;
+      // a character is emitted before its right edge: more room on the right
+      const L = Math.max(x0, Math.floor(x0 + r.pos[sp[0]] * k - FOCUS_PAD[0] * bh));
+      const R = Math.min(x1, Math.ceil(x0 + r.pos[sp[1] - 1] * k + FOCUS_PAD[1] * bh));
+      if (R - L > 0.8 * (x1 - x0) || R - L < bh) continue; // already snug / nonsense
+      // it has to confirm the date found in the wider read: a cut-off re-read ("18/04/2021" ->
+      // "18/04/2") otherwise parses to a different date and slips through
+      const iso = parseDate([...r.text].slice(...sp).join(""), { strict: o.strict }).iso;
+      read(y0, y1, L, R, iso).focus = true;
     }
   // label from a neighbouring line; one telltale kanji is enough there ("2費期", "2味:")
   if (best.date && !best.date.kind) {
@@ -691,6 +773,10 @@ function readGray(model, g, w, h, angle, o) {
     const inp = toInput(buf, cw, nh, model);
     return parseDate(recognize(model, inp.x, inp.w).text, { strict: o.strict });
   };
+  // another read with different framing already gave the same date: a second look for free
+  const same = (a, b) => a[0] === b[0] && a[1] === b[1];
+  // (a focus re-read counts too: it only keeps a date that the wider read also gave)
+  best.agree = !!best.date && reads.some((r) => r.date?.iso === best.date.iso && !(same(r.band, best.band) && same(r.cols, best.cols)));
   best.candidates = reads.map(({ text, conf, band }) => ({ text, conf, band }));
   return best;
 }

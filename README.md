@@ -54,7 +54,9 @@ const r = readRegion(model, { data: rgbaBytes, width, height }); // ImageData-li
 |---|---|---|
 | `strict` | `true` | drop readings OCR noise produces easily (see below) |
 | `minConf` | `0.8` | strict mode: reject results whose `dateConf` is below this |
-| `recheck` | `true` | strict mode: read the chosen line a second time with slightly different framing, reject if the date differs |
+| `recheck` | `true` | strict mode: read the chosen line a second time with slightly different framing, reject if the date differs (skipped when another candidate framing already gave the same date — `agree: false` turns that off) |
+| `strips` | `true` | wide box with no solid date yet: also look for lines strip by strip (each ~2 box heights wide), so text beside the date at other heights no longer merges it into one tall line |
+| `focus` | `true` | when the line also holds text beside the date (box framed loosely), re-read just the date characters, located from where the model emitted them; kept only if it confirms the wider read |
 
 Result:
 

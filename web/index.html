@@ -47,7 +47,7 @@ import { loadModel, readRegion } from "./kigen-ocr.js";
 
 const $ = (id) => document.getElementById(id);
 const video = $("video"), view = $("view"), guide = $("guide"), hint = $("hint");
-let model, mode = null, stream = null, sel = null, lastIso = null, streak = 0;
+let model, mode = null, stream = null, sel = null, lastIso = null, streak = 0, misses = 0;
 
 model = await loadModel("kigen.bin");
 hint.textContent = "「カメラ」または「画像」を選んでください";
@@ -90,24 +90,29 @@ function grab(src, sw, sh, box) { // box in source pixels
 
 function run(img) {
   const t = performance.now();
+  // the second look (recheck) stays on in camera mode too: a rejected frame no longer resets the
+  // streak (scanLoop), and recheck halves wrong dates (7:1 guide: 4.0% -> 2.0%), including
+  // misreads that repeat every frame, which the streak alone cannot catch
   const r = readRegion(model, img);
   const ms = performance.now() - t;
   drawDebug(r);
   return [r, ms];
 }
 
-// The camera frame is ~4.5:1, so a line tilted more than ~10° no longer fits in it.
+// The camera frame is ~7:1, so a line tilted more than ~6° no longer fits in it.
 const HINT_CAM = "日付を枠に合わせてください";
 function tiltHint(r) {
   if (mode !== "cam") return;
   const a = Math.round(Math.abs(r.skew || 0));
-  hint.textContent = a >= 8 ? `${a}° 傾いています — 日付の行を枠と平行にしてください` : HINT_CAM;
+  hint.textContent = a >= 6 ? `${a}° 傾いています — 日付の行を枠と平行にしてください` : HINT_CAM;
 }
 
 // ---------------- camera
 function layoutGuide() {
   const W = $("stage").clientWidth, H = $("stage").clientHeight;
-  const w = W * 0.86, h = Math.min(H * 0.3, w / 4.5);
+  // 7:1 holds about one line: at 4.5:1 the 賞味期限 line above the date came in too and
+  // doubled wrong dates (bench_region.mjs, guide aimed high: 9.3% -> 4.7% wrong at 7:1)
+  const w = W * 0.86, h = Math.min(H * 0.3, w / 7);
   Object.assign(guide.style, { left: `${(W - w) / 2}px`, top: `${(H - h) / 2}px`, width: `${w}px`, height: `${h}px` });
 }
 
@@ -118,13 +123,20 @@ async function scanLoop() {
     const gx = guide.offsetLeft * k, gy = guide.offsetTop * k, gw = guide.offsetWidth * k, gh = guide.offsetHeight * k;
     const [r, ms] = run(grab(video, vw, vh, { x: gx, y: gy, w: gw, h: gh }));
     tiltHint(r);
+    // only a different date restarts the streak; a frame without a date (blur, rejected read)
+    // just doesn't count. 5 misses in a row (~1s) means the label is gone: reset.
     const iso = r.date?.iso;
-    streak = iso && iso === lastIso ? streak + 1 : 0;
-    lastIso = iso;
-    if (streak >= 2) { show(r, ms); guide.classList.add("ok"); if (streak === 2) navigator.vibrate?.(60); }
+    if (iso) { streak = iso === lastIso ? streak + 1 : 0; lastIso = iso; misses = 0; }
+    else if (++misses >= 5) { streak = 0; lastIso = null; }
+    if (streak >= 2) {
+      guide.classList.add("ok");
+      if (iso) { show(r, ms); if (streak === 2) navigator.vibrate?.(60); }
+    }
     else { guide.classList.remove("ok"); if (!$("date").dataset.locked) show(r, ms); }
   }
-  setTimeout(scanLoop, 120);
+  // short pause between frames: at 120ms the wait was over half of each ~0.21s frame;
+  // 30ms makes a lock (~3.9 frames) take ~0.5s instead of ~0.8s, at more CPU/battery
+  setTimeout(scanLoop, 30);
 }
 
 $("camBtn").onclick = async () => {
