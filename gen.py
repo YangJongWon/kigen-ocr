@@ -13,7 +13,10 @@ from PIL import Image, ImageDraw, ImageFont
 
 # index 0 is the CTC blank
 CHARS = (" 0123456789〇一二三四五六七八九十年月日上中下旬初末令和平成昭元"
-         "賞味期限消費時分午前後ABCDEFGHIJKLMNOPQRSTUVWXYZ./-:()")
+         "賞味期限消費時分午前後ABCDEFGHIJKLMNOPQRSTUVWXYZ./-:()"
+         # appended for Korean / Chinese labels (indices of the characters above stay the same)
+         "유통기한소비품질지제조일자년월까생산"
+         "保质質有效至生产產製造到存民國国")
 VOCAB = ["<b>"] + list(CHARS)
 C2I = {c: i for i, c in enumerate(VOCAB)}
 import os
@@ -31,6 +34,29 @@ LATIN_FONTS = [(FD + f, 0) for f in [
     "arial.ttf", "arialbd.ttf", "ARIALN.TTF", "bahnschrift.ttf", "consola.ttf",
     "consolab.ttf", "cour.ttf", "courbd.ttf", "impact.ttf", "lucon.ttf", "OCRAEXT.TTF",
     "segoeui.ttf", "segoeuib.ttf", "tahoma.ttf", "verdana.ttf", "calibri.ttf"]]
+KR_FONTS = [(FD + f, i) for f, i in [
+    ("malgun.ttf", 0), ("malgunbd.ttf", 0), ("gulim.ttc", 0), ("batang.ttc", 0),
+    ("NotoSansKR-VF.ttf", 0), ("H2GTRM.TTF", 0)]]
+SC_FONTS = [(FD + f, i) for f, i in [("msyh.ttc", 0), ("msyhbd.ttc", 0), ("simsun.ttc", 0)]]
+TC_FONTS = [(FD + f, i) for f, i in [("msjh.ttc", 0), ("mingliub.ttc", 0)]]
+TH_FONTS = [(FD + f, 0) for f in ["leelawui.ttf", "tahoma.ttf"]]
+
+
+def script_fonts(text):
+    """CJK font list that has the glyphs of `text` (Japanese fonts lack Hangul and most hanzi)."""
+    if any("฀" <= c <= "๿" for c in text):
+        return TH_FONTS
+    if any("가" <= c <= "힣" for c in text):
+        return KR_FONTS
+    if any(c in "质产国" for c in text):
+        return SC_FONTS
+    if any(c in "質產國效" for c in text):
+        return TC_FONTS + SC_FONTS
+    if any(c in "保有至到存民" for c in text):
+        return SC_FONTS + TC_FONTS
+    return JP_FONTS
+
+
 CLUTTER = "原材料名小麦粉砂糖植物油脂食塩保存方法直射日光高温多湿を避けて内容量製造者株式会社東京都栄養成分表示"
 
 _font_cache = {}
@@ -68,7 +94,85 @@ MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", 
 LABEL_ONLY = ["賞味期限", "消費期限", "賞味期限:", "消費期限:", "期限", "賞味期限 ", "消費期限 "]
 
 
+ML_P = 0.3  # share of non-Japanese lines (Korean, Chinese, Taiwan, South-East Asia)
+
+
+THAI_MFG, THAI_EXP, THAI_BB = "ผลิต", "หมดอายุ", "ควรบริโภคก่อน"
+
+
+def ml_text():
+    """Date lines as printed in Korea, China, Taiwan, Thailand, Vietnam, Indonesia/Malaysia.
+
+    Returns (visual, label). Thai script is drawn but not in the vocabulary: it is left out of
+    the label so the model learns to skip it and read the digits."""
+    y, m, d = random.randint(2016, 2034), random.randint(1, 12), random.randint(1, 28)
+    p, yy = random.random() < 0.8, f"{y % 100:02d}"
+    lot = (" " + rand_code()) if random.random() < 0.2 else ""
+    thai = ""
+    lang = random.choices(["kr", "cn", "tw", "th", "vn", "id"], [4, 3, 1.5, 1, 1, 1])[0]
+    if lang == "kr":
+        # 소비기한 is the norm since 2024 (유통기한 on older / imported stock): "소비기한 2026.03.31까지"
+        f = random.random()
+        s = (f"{y}.{m:02d}.{d:02d}" if f < 0.4 else f"{y}. {m}. {d}." if f < 0.5 else f"{y}.{m:02d}.{d:02d}." if f < 0.55
+             else f"{yy}.{m:02d}.{d:02d}" if f < 0.7 else f"{y}년 {pad(m, p)}월 {pad(d, p)}일" if f < 0.85
+             else f"{y}-{m:02d}-{d:02d}")
+        if random.random() < 0.1 and "년" not in s:
+            s += f" {random.randint(0, 23):02d}:{random.choice(['00', '00', '30'])}"  # ready meals
+        if random.random() < 0.4:
+            s += random.choice(["까지", " 까지"])
+        pre = random.choices(["소비기한 ", "소비기한:", "소비기한 : ", "유통기한 ", "유통기한:", "품질유지기한 ",
+                              "제조일자 ", "제조일자:", "제조일 ", ""], [5, 3, 2, 2, 2, 1, 2, 1, 1, 4])[0]
+    elif lang == "cn":
+        # GB 7718: 生产日期 + 保质期 (often a duration); a date is given as 保质期至 / 有效期至
+        f = random.random()
+        s = (f"{y}{m:02d}{d:02d}" if f < 0.35 else f"{y}年{m:02d}月{d:02d}日" if f < 0.6
+             else f"{y}/{m:02d}/{d:02d}" if f < 0.75 else f"{y}-{m:02d}-{d:02d}" if f < 0.9 else f"{y}.{m:02d}.{d:02d}")
+        pre = random.choices(["生产日期:", "生产日期", "生产日期 ", "保质期至:", "保质期至", "有效期至:",
+                              "有效期至", "到期日:", ""], [4, 2, 1, 2, 2, 2, 1, 1, 3])[0]
+    elif lang == "tw":
+        # mostly 西元; some products use the ROC year (民國115 = 2026)
+        r, f = y - 1911, random.random()
+        s = (f"{y}.{m:02d}.{d:02d}" if f < 0.3 else f"{y}/{m:02d}/{d:02d}" if f < 0.55 else f"{y}年{m:02d}月{d:02d}日" if f < 0.65
+             else f"{r}.{m:02d}.{d:02d}" if f < 0.85 else f"{r}/{m:02d}/{d:02d}" if f < 0.92 else f"民國{r}年{m:02d}月{d:02d}日")
+        pre = random.choices(["有效日期:", "有效日期", "製造日期:", "製造日期", "有效期限:", ""], [4, 2, 3, 1, 1, 2])[0]
+    elif lang == "th":
+        # Thai labels: ผลิต (MFG) / หมดอายุ (EXP) / ควรบริโภคก่อน (BB), Buddhist-era years (2569, or 69)
+        f = random.random()
+        yv = str(y) if f < 0.45 else str(y + 543) if f < 0.75 else f"{(y + 543) % 100:02d}"
+        sep = random.choice("/./-")
+        s = f"{d:02d}{sep}{m:02d}{sep}{yv}"
+        tl = random.choices([("EXP ", ""), ("MFG ", ""), ("", THAI_EXP), ("", THAI_MFG), ("", THAI_BB), ("BBE ", "")],
+                            [3, 2, 2, 1, 1, 1])[0]
+        pre, thai = tl
+    elif lang == "vn":
+        # NSX (ngày sản xuất) and HSD (hạn sử dụng), often both on one line
+        a = f"{d:02d}/{m:02d}/{y}" if random.random() < 0.7 else f"{d:02d}.{m:02d}.{yy}"
+        y2 = y + random.randint(0, 2)
+        b = f"{d:02d}/{m:02d}/{y2}" if random.random() < 0.7 else f"{d:02d}.{m:02d}.{y2 % 100:02d}"
+        f = random.random()
+        s, pre = ((f"NSX: {a} HSD: {b}", "") if f < 0.35 else (b, random.choice(["HSD: ", "HSD ", "HSD:"])) if f < 0.7
+                  else (a, random.choice(["NSX: ", "NSX ", "NSX:"])))
+    else:
+        # Indonesia / Malaysia: BAIK DIGUNAKAN SEBELUM, EXP / BB, day first
+        sep = random.choice(["/", ".", " ", "-", ""])
+        s = f"{d:02d}{sep}{m:02d}{sep}{y if random.random() < 0.6 else yy}"
+        pre = random.choices(["EXP ", "EXP:", "BB ", "BAIK DIGUNAKAN SEBELUM ", "GUNA SEBELUM ", "MFG ", ""],
+                             [3, 2, 2, 1, 1, 1, 1])[0]
+    if random.random() < 0.08 and pre.strip(" :"):
+        t = pre.strip(" :")  # the label line alone
+        return visual_variant(t), norm_label(t)
+    t = " ".join((pre + s + lot).split())
+    if len(t) > 26:
+        t = " ".join((s + lot).split()) if len(s + lot) <= 26 else s
+    vis = visual_variant(t)
+    if thai:
+        vis = thai + random.choice([" ", ": ", " "]) + vis
+    return vis, norm_label(t)
+
+
 def rand_text():
+    if random.random() < ML_P:
+        return ml_text()
     # a label line on its own (the line above the date once a box is split into lines)
     if random.random() < 0.06:
         t = random.choice(LABEL_ONLY).strip()
@@ -224,7 +328,7 @@ def visual_variant(t):
 def line_mask(text, h=64):
     """White-on-black mask of the text line at height ~h."""
     size = int(h * random.uniform(0.7, 0.85))
-    jp = random.choice(JP_FONTS)
+    jp = random.choice(script_fonts(text))
     lat = random.choice(LATIN_FONTS) if random.random() < 0.55 else jp
     track = random.uniform(-0.05, 0.25) * size
     squash = random.uniform(0.75, 1.25)  # horizontal scale

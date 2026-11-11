@@ -126,6 +126,12 @@ def main():
         # layers whose shape changed (e.g. the last conv when IMG_H changes) start fresh
         sd, own = torch.load(args.init, map_location=dev), model.state_dict()
         keep = {k: v for k, v in sd.items() if k in own and own[k].shape == v.shape}
+        # vocabulary grew at the end: copy the old output rows, new characters start fresh
+        for k, v in sd.items():
+            if k in own and k not in keep and v.shape[1:] == own[k].shape[1:] and v.shape[0] < own[k].shape[0]:
+                t = own[k].clone()
+                t[: v.shape[0]] = v
+                keep[k] = t
         model.load_state_dict(keep, strict=False)
         print("init from", args.init, f"({len(keep)}/{len(own)} tensors)")
     print("params", sum(p.numel() for p in model.parameters()))

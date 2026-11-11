@@ -324,11 +324,6 @@ function crop(g, w, y0, y1, x0 = 0, x1 = w) {
   return out;
 }
 
-function kindOf(text) {
-  const s = (text || "").normalize("NFKC");
-  return /消費|USE ?BY/.test(s) ? "消費期限" : /賞味|EXP|BB|BEST/.test(s) ? "賞味期限" : null;
-}
-
 // Skew of the text in degrees (-90..90): the angle at which strong-edge points, projected
 // onto the vertical axis, pile up into the sharpest row histogram (text lines horizontal).
 const SKEW_MAX = 90; // line direction is defined modulo 180°; up/down is settled by readRegion
@@ -400,6 +395,11 @@ const weak = (r) => !r.date || r.date.order === "MD" || r.conf < 0.6;
 export function readRegion(model, img, opts = {}) {
   const o = { strict: opts.strict ?? true, minConf: opts.minConf ?? MIN_CONF };
   const best = readTurns(model, img, o);
+  // only a manufacturing date was found: never hand it out as the expiry
+  if (o.strict && best.date?.type === "production") {
+    best.rejected = { date: best.date, reason: "production" };
+    best.date = null;
+  }
   if (o.strict && best.date && best.conf < o.minConf) {
     best.rejected = { date: best.date, reason: "lowconf" };
     best.date = null;
@@ -458,8 +458,9 @@ function readGray(model, g, w, h, angle, o) {
     r.cols = [x0, x1];
     r.input = inp;
     reads.push(r);
-    // a bare label line ("賞味期限") is never the answer
-    r.score = r.conf + (r.date ? 0.5 : 0) - (/\d/.test(r.text) ? 0 : 0.5);
+    // a bare label line ("賞味期限") is never the answer; a manufacturing date (生产日期, 제조일자,
+    // MFG) loses to an expiry line in the same box
+    r.score = r.conf + (r.date ? 0.5 : 0) - (/\d/.test(r.text) ? 0 : 0.5) - (r.date?.type === "production" ? 0.6 : 0);
     if (!best || r.score > best.score) best = { ...r };
     return r;
   };
@@ -493,8 +494,10 @@ function readGray(model, g, w, h, angle, o) {
       const [a, b] = r.band, [c, d] = ref.band;
       if (Math.min(b, d) - Math.max(a, c) > 0.3 * (b - a) || b - a < 0.6 * (d - c)) continue;
       if ((r.text.match(/\d/g) || []).length > 2) continue;
-      const k = kindOf(r.text) ?? (/[消費]/.test(r.text) ? "消費期限" : /[賞味]/.test(r.text) ? "賞味期限" : null);
-      if (k) { best.date = { ...best.date, kind: k }; break; }
+      // a 제조일자 / 生产日期 / MFG line above an unlabelled date makes it a manufacturing date
+      const k = labelOf(r.text) ?? (/[消費]/.test(r.text) ? { kind: "消費期限", type: "expiry" }
+        : /[賞味]/.test(r.text) ? { kind: "賞味期限", type: "expiry" } : null);
+      if (k) { best.date = { ...best.date, ...k }; break; }
     }
   }
   best.lines = lines;
@@ -558,6 +561,7 @@ const pad2 = (n) => String(n).padStart(2, "0");
 
 function mkDate(y, m, d) {
   if (y < 100) y += 2000;
+  if (y >= 2500 && y <= 2650) y -= 543; // Thai Buddhist era (2569 = 2026)
   if (m < 1 || m > 12 || y < 1950 || y > 2099) return null;
   if (d == null) return { y, m };
   const dim = new Date(y, m, 0).getDate();
@@ -565,16 +569,54 @@ function mkDate(y, m, d) {
   return { y, m, d };
 }
 
-// "賞味期限 R7.12.31 A3" -> {kind:"賞味期限", iso:"2025-12-31", precision:"day", ...}
+// Date labels. type "expiry" = best-before / use-by, "production" = manufacturing date, which
+// must never be taken for the expiry (Chinese/Korean labels often print both).
+// kind keeps the Japanese names for 賞味/消費 and EXP/BB/USE BY (backward compatible); other
+// labels are reported as printed (유통기한, 保质期, 有效日期, 제조일자, 生产日期, MFG ...).
+const LABELS = [
+  [/消費期限|消費|USE ?BY/, "消費期限", "expiry"],
+  [/賞味期限|賞味|BEST ?BEFORE|EXP|BB/, "賞味期限", "expiry"],
+  [/소비기한/, "소비기한", "expiry"],
+  [/유통기한/, "유통기한", "expiry"],
+  [/품질유지기한/, "품질유지기한", "expiry"],
+  [/保质期|保質期/, "保质期", "expiry"],
+  [/有效期|有效日期|有效期限/, "有效期", "expiry"],
+  [/到期日|保存期限/, "到期日", "expiry"],
+  [/HSD/, "HSD", "expiry"],
+  [/SEBELUM/, "賞味期限", "expiry"],                    // ID/MY: BAIK DIGUNAKAN SEBELUM / GUNA SEBELUM
+  [/製造年月日|製造日期|製造日|生产日期|生產日期|生产|生產/, "製造日", "production"],
+  [/제조일자|제조일|생산일|제조/, "제조일자", "production"],
+  [/MFG|MFD|PROD|PRD|NSX|PRODUKSI/, "MFG", "production"],
+];
+function labelOf(text) {
+  const s = (text || "").normalize("NFKC").toUpperCase();
+  // an expiry label wins when a line carries both ("製造 2026.01 賞味期限 2026.12")
+  for (const [re, kind, type] of LABELS) if (type === "expiry" && re.test(s)) return { kind, type };
+  for (const [re, kind, type] of LABELS) if (type === "production" && re.test(s)) return { kind, type };
+  return null;
+}
+
+// "賞味期限 R7.12.31 A3" -> {kind:"賞味期限", type:"expiry", iso:"2025-12-31", precision:"day", ...}
 // opts.today: reference date for plausibility (default: now)
 export function parseDate(text, opts = {}) {
   if (!text) return null;
   let s = kanjiToDigits(text.normalize("NFKC")).replace(/元年/g, "1年")
+    // Korean 2026년 3월 31일까지 / Chinese 至 2026年… : same structure as 年月日
+    .replace(/(\d)\s*년/g, "$1年").replace(/(\d)\s*월/g, "$1月").replace(/(\d)\s*일/g, "$1日")
+    .replace(/까지|迄|至/g, " ")
     .replace(/\s*([.\/\-:年月])\s*/g, "$1")          // "R8. 11. 16" -> "R8.11.16"
     .replace(/(^|[^A-Z])([RHS]) (?=\d)/g, "$1$2");   // "R 8.11.16"
-  const kind = /消費|USE ?BY/.test(s) ? "消費期限" : /賞味|EXP|BB|BEST/.test(s) ? "賞味期限" : null;
+  const label = labelOf(s);
+  const kind = label?.kind ?? null, type = label?.type ?? null;
+  // both labels on one line ("MFG 2026.01.15 EXP 2027.01.14"): keep only the expiry part
+  const reOf = (t) => new RegExp(LABELS.filter((l) => l[2] === t).map((l) => l[0].source).join("|"), "g");
+  const ex = [...s.matchAll(reOf("expiry"))], pr = [...s.matchAll(reOf("production"))];
+  if (ex.length && pr.length) {
+    const e = ex[0].index, p = pr[0].index;
+    s = e > p ? s.slice(e) : s.slice(0, p);
+  }
   // drop label words so an era letter glued to them still parses: "EXPH1.12.12", "BBR8.3.1"
-  s = markMonths(s.replace(/BEST ?BEFORE|USE ?BY|EXP\.?|BB/g, " "))
+  s = markMonths(s.replace(/BEST ?BEFORE|USE ?BY|EXP\.?|BB|MFG|MFD|PROD|HSD|NSX/g, " "))
     .replace(/(?<=\d)O(?![A-Z])|(?<![A-Z])O(?=\d)/g, "0"); // "2022.09.1O", "202O" (letter O next to digits)
   // time: 14時 / 14時30分 / 午後2時 / 14:30
   let time = null;
@@ -590,7 +632,7 @@ export function parseDate(text, opts = {}) {
   // strict: a wrong expiry entered silently is worse than no read. A digit run of 5+ glued to a
   // separator means the year is broken ("22027/03/31": label edge read as "2") -> no date.
   if (opts.strict && /\d{5,}[.\/\-年]|[.\/\-]\d{5,}/.test(s)) return null;
-  let cands = findCandidates(s, kind, opts.today || new Date(), !!time);
+  let cands = findCandidates(s, kind, opts.today || new Date(), !!time, /有效|保存期限|製造|生產|到期|民國|民国/.test(s));
   if (opts.strict) cands = cands.filter((c) => !c.loose);
   if (!cands.length) return null;
   const r = cands[0];
@@ -608,7 +650,7 @@ export function parseDate(text, opts = {}) {
   const toIso = (c) => `${c.y}-${pad2(c.m)}` + (c.d ? `-${pad2(c.d)}` : "");
   const alternatives = [...new Set(cands.slice(1).filter((c) => c.score >= r.score - 2 && (!r.d || c.d)).map(toIso))]
     .filter((v) => v !== iso);
-  return { kind, iso, precision, part, latest, time, order: r.order, alternatives };
+  return { kind, type, iso, precision, part, latest, time, order: r.order, alternatives };
 }
 
 // month-day without a year: this year, or next year if it already passed (>60 days ago)
@@ -620,7 +662,7 @@ function inferYear(m, d, today) {
 // All readings of every date-like token, best first.
 // Explicit forms (era, 年月日) beat bare digit groups; for bare digits every
 // order (YMD / DMY / MDY) is tried and judged by validity and plausibility.
-function findCandidates(s, kind, today, hasTime) {
+function findCandidates(s, kind, today, hasTime, taiwan = false) {
   const out = [];
   const foreign = /EXP|BB|BEST|USE/.test(s);
   const t0 = Date.UTC(today.getFullYear(), today.getMonth(), today.getDate());
@@ -631,6 +673,8 @@ function findCandidates(s, kind, today, hasTime) {
     const days = (Date.UTC(r.y, r.m - 1, r.d || 15) - t0) / 864e5;
     // expiry dates sit near today, mostly in the future
     const plaus = days >= -400 && days <= 6 * 366 ? 3 : days >= -3 * 366 && days <= 12 * 366 ? 1 : 0;
+    // loose "far": doubtful only when the date is not near today ("26.03" yes, "10.08" -> 2010 no)
+    if (loose === "far") loose = plaus < 3;
     out.push({ ...r, order, score: base + plaus, loose });
   };
   const marked = /[旬末初中月]/.test(s); // "26.4月初" / "R8.3下旬": a two-part date with an explicit part
@@ -642,7 +686,13 @@ function findCandidates(s, kind, today, hasTime) {
   // (?!\d): "H05.05.2022" is not 平成5年5月20日
   for (m of s.matchAll(/(?:^|[^A-Z])(令和|平成|昭和|令|平|昭|[RHS])(\d{1,2})[.\/\-年](\d{1,2})(?:[.\/\-月](\d{1,2}))?(?![\d]|[.\/\-]\d)/g))
     add(ERA[m[1]] + +m[2], +m[3], m[4] && +m[4], "era", 9);
-  for (m of s.matchAll(/(\d{2,4})年(\d{1,2})月(?:(\d{1,2})日)?/g))
+  // Taiwan (ROC) era: 民國115年3月31日 / 民國115.03.31; a bare 3-digit year (115.03.31) only
+  // next to a Taiwanese label (有效日期, 製造日期 ...) — elsewhere it is likely a broken year
+  for (m of s.matchAll(/(民國|民国)(\d{2,3})[年.\/\-](\d{1,2})(?:[月.\/\-](\d{1,2}))?(?![\d]|[.\/\-]\d)/g))
+    add(1911 + +m[2], +m[3], m[4] && +m[4], "roc", 10);
+  for (m of s.matchAll(/(?<![\d.\/\-])(1[01]\d)[年.\/\-](\d{1,2})[月.\/\-](\d{1,2})(?!\d)/g))
+    add(1911 + +m[1], +m[2], +m[3], "roc", 7, !taiwan);
+  for (m of s.matchAll(/(?<!\d)(\d{2}|\d{4})年(\d{1,2})月(?:(\d{1,2})日)?/g))
     add(+m[1], +m[2], m[3] && +m[3], "YMD", 8);
   for (m of s.matchAll(/(?<![\d年])(\d{1,2})月(\d{1,2})日/g)) // 11月9日 (no year)
     add(inferYear(+m[1], +m[2], today), +m[1], +m[2], "MD", 7);
@@ -668,12 +718,14 @@ function findCandidates(s, kind, today, hasTime) {
         const lostEra = a.length === 1 && c.length === 2;
         add(+c, +b, +a, "DMY", P.DMY + (c.length === 4 ? 0.5 : 0), lostEra);
         add(+c, +a, +b, "MDY", P.MDY + (c.length === 4 ? 0.5 : 0), lostEra);
+        // Thai labels often print the Buddhist-era year with 2 digits: 31/03/69 = 2569 = 2026
+        if (c.length === 2 && +c >= 60 && +c <= 80) add(2500 + +c, +b, +a, "DMY", P.DMY, lostEra);
       }
       if (c.length <= 2 && (a.length === 4 || a.length === 2)) add(+a, +b, +c, "YMD", P.YMD + (a.length === 4 ? 1 : 0));
     } else {
       // a two-part date touching a separator is a cut-off three-part one ("2022.01.", "/12/2021")
       const cut = /[.\/\-]/.test(s[m.index - 1] ?? "") || /[.\/\-]/.test(s[m.index + m[0].length] ?? "");
-      if (a.length === 4 || a.length === 2) add(+a, +b, null, "YM", 2 + (a.length === 4 ? 1 : 0), cut || (a.length === 2 && !marked));
+      if (a.length === 4 || a.length === 2) add(+a, +b, null, "YM", 2 + (a.length === 4 ? 1 : 0), cut || (a.length === 2 && !marked && "far"));
       if (a.length <= 2 && b.length === 2) add(+b, +a, null, "MY", 1, cut || !marked);
       // 11.09 14:00 -> month-day without year (likely when a time follows)
       if (a.length <= 2) add(inferYear(+a, +b, today), +a, +b, "MD", hasTime ? 4 : 0.5, !hasTime);

@@ -130,6 +130,52 @@ for (const [t, want, kind, latest, time] of cases) {
   if (!ok) fail++;
   console.log(ok ? "ok  " : "FAIL", t, "->", JSON.stringify(r));
 }
+// other languages: [text, iso, kind, type]
+const multiCases = [
+  // Korean
+  ["유통기한 2026.03.31까지", "2026-03-31", "유통기한", "expiry"],
+  ["소비기한: 2026년 3월 31일", "2026-03-31", "소비기한", "expiry"],
+  ["2026년 03월 31일까지", "2026-03-31", null, null],
+  ["26.03.31까지", "2026-03-31", null, null],
+  ["제조일자 2026.01.15", "2026-01-15", "제조일자", "production"],
+  ["품질유지기한 2027.01.31", "2027-01-31", "품질유지기한", "expiry"],
+  // Chinese (simplified)
+  ["保质期至2026年03月31日", "2026-03-31", "保质期", "expiry"],
+  ["有效期至 2026.03.31", "2026-03-31", "有效期", "expiry"],
+  ["生产日期:2026-01-15", "2026-01-15", "製造日", "production"],
+  ["生产日期 20260115", "2026-01-15", "製造日", "production"],
+  // Chinese (traditional / Taiwan, ROC era)
+  ["有效日期:民國115年3月31日", "2026-03-31", "有效期", "expiry"],
+  ["有效日期 115.03.31", "2026-03-31", "有效期", "expiry"],
+  ["民國115.03.31", "2026-03-31", null, null],
+  ["製造日期 115/01/15", "2026-01-15", "製造日", "production"],
+  // Thai Buddhist era, Vietnamese / generic labels
+  ["EXP 31/03/2569", "2026-03-31", "賞味期限", "expiry"],
+  ["31/03/69", "2026-03-31", null, null],          // Thai label, 2-digit Buddhist-era year
+  ["EXP 31.03.2569", "2026-03-31", "賞味期限", "expiry"],
+  ["소비기한 2026. 3. 31.까지", "2026-03-31", "소비기한", "expiry"],
+  ["2026.03.31. 까지", "2026-03-31", null, null],
+  ["소비기한 2026.03.31 14:00까지", "2026-03-31", "소비기한", "expiry"],
+  ["NSX: 15/01/2026 HSD: 15/01/2027", "2027-01-15", "HSD", "expiry"],
+  ["BAIK DIGUNAKAN SEBELUM 31 03 2026", "2026-03-31", "賞味期限", "expiry"],
+  ["EXP 310326", "2026-03-31", "賞味期限", "expiry"],
+  ["有效日期:2026/03/31", "2026-03-31", "有效期", "expiry"],
+  ["生产日期:20260301 A2", "2026-03-01", "製造日", "production"],
+  ["HSD 31/03/2026", "2026-03-31", "HSD", "expiry"],
+  ["NSX 15/01/2026", "2026-01-15", "MFG", "production"],
+  ["MFG 2026.01.15", "2026-01-15", "MFG", "production"],
+  ["MFG 2026.01.15 EXP 2027.01.14", "2027-01-14", "賞味期限", "expiry"], // both on one line: the expiry date
+  ["EXP 2027.01.14 MFG 2026.01.15", "2027-01-14", "賞味期限", "expiry"],
+  ["生产日期2026.01.15 保质期至2027.01.14", "2027-01-14", "保质期", "expiry"],
+  ["제조일자 2026.01.15 유통기한 2027.01.14", "2027-01-14", "유통기한", "expiry"],
+];
+for (const [t, want, kind, type] of multiCases) {
+  const r = parseDate(t, { today: new Date(2026, 10, 9) });
+  const ok = (r ? r.iso : null) === want && (r?.kind ?? null) === kind && (r?.type ?? null) === type;
+  if (!ok) fail++;
+  console.log(ok ? "ok  " : "FAIL", "[multi]", t, "->", JSON.stringify(r && { iso: r.iso, kind: r.kind, type: r.type }));
+}
+
 // strict mode: readings OCR noise produces easily must give no date at all
 const strictCases = [
   ["22027/03/31", null],                  // label edge read as "2": broken year
@@ -137,13 +183,16 @@ const strictCases = [
   ["2/8", null],                          // yearless, no time
   ["2/07", null],
   ["03/31", null],                        // 2-digit-year two-part (was read as 2031-03)
-  ["26.3", null],
+  ["10.08", null],                       // 2-digit-year YM far from today (2010-08): doubtful
+  ["99.12", null],
   ["2022.01.", null],                     // day cut off: not "January 2022"
   ["2021.11.17I", null],
   ["10:19/12/2021", null],                // left part eaten as a time
   ["H05.05.2022", null],                  // only "05.2022" is readable: cut-off
   ["7/2/10", null],                       // 令7/2/10 with the era lost, not 2010-02-07
   ["8.3.31", null],
+  ["115.03.31", null],                    // bare 3-digit year without a Taiwanese label: broken year?
+  ["有效日期 115.03.31", "2026-03-31"],
   // still accepted
   ["AUG292020", "2020-08-29"],
   ["2026.03 末", "2026-03"],
@@ -151,6 +200,10 @@ const strictCases = [
   ["27.03.31", "2027-03-31"],
   ["20270331", "2027-03-31"],
   ["2027.03", "2027-03"],
+  ["26.3", "2026-03"],                   // 2-digit-year YM near today
+  ["26.03", "2026-03"],
+  ["26/3", "2026-03"],
+  ["27-01", "2027-01"],
   ["03.2027", "2027-03"],
   ["26.4月初", "2026-04"],
   ["R8.3下旬", "2026-03"],
