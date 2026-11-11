@@ -724,7 +724,9 @@ function findCandidates(s, kind, today, hasTime, taiwan = false) {
       if (c.length <= 2 && (a.length === 4 || a.length === 2)) add(+a, +b, +c, "YMD", P.YMD + (a.length === 4 ? 1 : 0));
     } else {
       // a two-part date touching a separator is a cut-off three-part one ("2022.01.", "/12/2021")
-      const cut = /[.\/\-]/.test(s[m.index - 1] ?? "") || /[.\/\-]/.test(s[m.index + m[0].length] ?? "");
+      // ("2026.9/CK", "2026.9/0K": a lot code after the separator is not a cut-off day)
+      const nx = m.index + m[0].length;
+      const cut = /[.\/\-]/.test(s[m.index - 1] ?? "") || (/[.\/\-]/.test(s[nx] ?? "") && !/^\s?\d?[A-Z]/.test(s.slice(nx + 1, nx + 4)));
       if (a.length === 4 || a.length === 2) add(+a, +b, null, "YM", 2 + (a.length === 4 ? 1 : 0), cut || (a.length === 2 && !marked && "far"));
       if (a.length <= 2 && b.length === 2) add(+b, +a, null, "MY", 1, cut || !marked);
       // 11.09 14:00 -> month-day without year (likely when a time follows)

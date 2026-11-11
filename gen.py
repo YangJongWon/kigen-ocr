@@ -280,7 +280,7 @@ def rand_text():
         pre = ""
     suf = ""
     if random.random() < 0.25:
-        suf = " " + rand_code()
+        suf = random.choice([" ", " ", " ", "/", " /"]) + rand_code()
     t = " ".join((pre + s + suf).split())
     if len(t) > 24:
         t = s
@@ -358,6 +358,82 @@ def line_mask(text, h=64):
     elif r < 0.3:
         m = cv2.erode(m, np.ones((2, 2), np.uint8))
     return m
+
+
+# 5x7 dot-matrix font of inkjet date coders (CIJ printers on bottles, cans, cups)
+DOT5X7 = {k: v.split() for k, v in {
+    "0": "01110 10001 10011 10101 11001 10001 01110", "1": "00100 01100 00100 00100 00100 00100 01110",
+    "2": "01110 10001 00001 00010 00100 01000 11111", "3": "11111 00010 00100 00010 00001 10001 01110",
+    "4": "00010 00110 01010 10010 11111 00010 00010", "5": "11111 10000 11110 00001 00001 10001 01110",
+    "6": "00110 01000 10000 11110 10001 10001 01110", "7": "11111 00001 00010 00100 01000 01000 01000",
+    "8": "01110 10001 10001 01110 10001 10001 01110", "9": "01110 10001 10001 01111 00001 00010 01100",
+    "A": "01110 10001 10001 11111 10001 10001 10001", "B": "11110 10001 10001 11110 10001 10001 11110",
+    "C": "01110 10001 10000 10000 10000 10001 01110", "D": "11100 10010 10001 10001 10001 10010 11100",
+    "E": "11111 10000 10000 11110 10000 10000 11111", "F": "11111 10000 10000 11110 10000 10000 10000",
+    "G": "01110 10001 10000 10111 10001 10001 01111", "H": "10001 10001 10001 11111 10001 10001 10001",
+    "I": "01110 00100 00100 00100 00100 00100 01110", "J": "00111 00010 00010 00010 00010 10010 01100",
+    "K": "10001 10010 10100 11000 10100 10010 10001", "L": "10000 10000 10000 10000 10000 10000 11111",
+    "M": "10001 11011 10101 10101 10001 10001 10001", "N": "10001 10001 11001 10101 10011 10001 10001",
+    "O": "01110 10001 10001 10001 10001 10001 01110", "P": "11110 10001 10001 11110 10000 10000 10000",
+    "Q": "01110 10001 10001 10001 10101 10010 01101", "R": "11110 10001 10001 11110 10100 10010 10001",
+    "S": "01111 10000 10000 01110 00001 00001 11110", "T": "11111 00100 00100 00100 00100 00100 00100",
+    "U": "10001 10001 10001 10001 10001 10001 01110", "V": "10001 10001 10001 10001 10001 01010 00100",
+    "W": "10001 10001 10001 10101 10101 10101 01010", "X": "10001 10001 01010 00100 01010 10001 10001",
+    "Y": "10001 10001 10001 01010 00100 00100 00100", "Z": "11111 00001 00010 00100 01000 10000 11111",
+    ".": "00 00 00 00 00 11 11", ":": "00 11 11 00 11 11 00", "-": "0000 0000 0000 1111 0000 0000 0000",
+    "/": "00001 00001 00010 00100 01000 10000 10000", "(": "001 010 100 100 100 010 001",
+    ")": "100 010 001 001 001 010 100",
+}.items()}
+# variants seen on real coders: zero without the slash dot, 1 without foot, open-top 4
+DOT5X7_ALT = {"0": ["01110 10001 10001 10001 10001 10001 01110"], "1": ["00100 01100 00100 00100 00100 00100 00100"],
+              "4": ["10010 10010 10010 11111 00010 00010 00010"], "7": ["11111 00001 00001 00010 00100 00100 00100"],
+              "9": ["01110 10001 10001 01111 00001 00001 01110"], "6": ["01110 10000 10000 11110 10001 10001 01110"]}
+
+
+def dot_ok(text):
+    import unicodedata
+    return all(c == " " or c in DOT5X7 for c in unicodedata.normalize("NFKC", text))
+
+
+def dot_matrix(text, h=64):
+    """Mask of a line printed by a 5x7 (or 5x5-ish squashed) inkjet coder."""
+    import unicodedata
+    text = unicodedata.normalize("NFKC", text)
+    p = h * random.uniform(0.11, 0.13)          # vertical dot pitch: 7 rows ≈ 0.8 h
+    px = p * random.uniform(0.75, 1.35)         # horizontal pitch (print speed)
+    gap = random.choice([1, 1, 1, 2])           # empty columns between characters
+    bold = random.random() < 0.2                 # each column fired twice (double-strike)
+    rad = p * random.uniform(0.3, 0.55)
+    jit = p * random.uniform(0, 0.12)
+    slant = random.uniform(-0.15, 0.15) if random.random() < 0.3 else 0.0  # nozzle head tilt
+    alts = random.random() < 0.5
+    dots, col = [], 0
+    for ch in text:
+        if ch == " ":
+            col += random.randint(2, 5)
+            continue
+        rows = DOT5X7[ch]
+        if alts and ch in DOT5X7_ALT:
+            rows = DOT5X7_ALT[ch][0].split()
+        for r, row in enumerate(rows):
+            for c, bit in enumerate(row):
+                if bit == "1":
+                    dots.append((col + c, r))
+                    if bold:
+                        dots.append((col + c + 0.5, r))
+        col += len(rows[0]) + gap
+    W = int((col + 4) * px + 2 * h)
+    out = np.zeros((h * 2, W), np.uint8)
+    y0 = h * 0.5
+    for (c, r) in dots:
+        if random.random() < 0.02:  # missing nozzle
+            continue
+        cx = h * 0.5 + c * px + r * p * slant + random.gauss(0, jit)
+        cy = y0 + r * p + random.gauss(0, jit)
+        rr = rad * random.uniform(0.85, 1.15)
+        cv2.circle(out, (int(cx * 4), int(cy * 4)), max(1, int(rr * 4)), 255, -1, lineType=cv2.LINE_AA, shift=2)
+    return out
+
 
 
 def dotify(m, text):
@@ -450,11 +526,17 @@ def neighbor(canvas, th, mt, mb, ink):
         canvas[:] = np.array(img, np.float32)
 
 
-def render(text):
-    m = line_mask(text)
-    style = random.choices(["print", "dot", "faint"], [4, 5, 1.5])[0]
-    if style == "dot":
-        m = dotify(m, text)
+def render(text, style=None, curve=None):
+    style = style or random.choices(["print", "dot", "faint"], [4, 5, 1.5])[0]
+    if style == "dot5x7" or (style == "dot" and random.random() < 0.55 and dot_ok(text)):
+        style = "dot"
+        m = dot_matrix(text)
+    else:
+        if style == "dot5x7":
+            style = "dot"
+        m = line_mask(text)
+        if style == "dot":
+            m = dotify(m, text)
     ys, xs = np.nonzero(m > 40)
     if len(ys) == 0:
         return None
@@ -493,15 +575,26 @@ def render(text):
     if style != "faint" and np.mean(diff < 45) > 0.08:
         return None
     img = img.astype(np.uint8)
-    img = geometric(img)
+    img = geometric(img, curve)
     img = photometric(img)
     return img
 
 
-def geometric(img):
+def geometric(img, curve=None):
     h, w = img.shape[:2]
-    if random.random() < 0.35:  # curved surface (bottle / cup)
-        amp = random.uniform(0, 0.12) * h
+    curved = random.random() < 0.4 if curve is None else curve
+    if curved and random.random() < 0.6:
+        # cylinder seen from the front: glyphs narrow towards the edges (bottle / can shoulder)
+        th = math.radians(random.uniform(20, 70))
+        sx = np.linspace(-1, 1, w, dtype=np.float32)
+        u = np.arcsin(np.clip(sx * math.sin(th), -1, 1)) / th
+        off = random.uniform(-0.25, 0.25)  # the line need not sit centred on the axis
+        u = np.clip(u + off * (1 - np.abs(u)), -1, 1)
+        mx = np.tile(((u + 1) / 2 * (w - 1)).astype(np.float32), (h, 1))
+        my = np.tile(np.arange(h, dtype=np.float32)[:, None], (1, w))
+        img = cv2.remap(img, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    if curved:  # curved surface (bottle / cup)
+        amp = random.uniform(0, 0.2) * h
         ph = random.uniform(0, math.pi)
         fx = np.arange(w, dtype=np.float32)
         mx = np.tile(fx, (h, 1))
