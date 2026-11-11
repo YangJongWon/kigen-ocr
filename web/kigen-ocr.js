@@ -556,8 +556,13 @@ export function readRegion(model, img, opts = {}) {
   }
   // a digit misread with high confidence ("10.08" -> "10.03") rarely survives a second look
   if (o.strict && best.date && (opts.recheck ?? RECHECK)) {
+    // (a 2-of-3 tie-break with wider framing was tried: +2-9% right dates but up to 2x wrong ones,
+    // the third read tends to repeat the first one's misread)
     const again = best.recheck();
-    if (again?.iso !== best.date.iso) { best.rejected = { date: best.date, reason: "unstable", again: again?.iso ?? null }; best.date = null; }
+    if (again?.iso !== best.date.iso) {
+      best.rejected = { date: best.date, reason: "unstable", again: again?.iso ?? null };
+      best.date = null;
+    }
   }
   delete best.recheck;
   return best;
@@ -778,6 +783,9 @@ export function parseDate(text, opts = {}) {
     .replace(/\s*([.\/\-:年月])\s*/g, "$1")          // "R8. 11. 16" -> "R8.11.16"
     .replace(/(^|[^A-Z])([RHS]) (?=\d)/g, "$1$2");   // "R 8.11.16"
   const label = labelOf(s);
+  // day-first regions label in Latin script (EXP, BB, HSD, SEBELUM ...); judged before the
+  // label words are stripped below
+  const foreign = /EXP|BB|BEST|USE ?BY|HSD|NSX|SEBELUM|MFG|MFD/.test(s);
   const kind = label?.kind ?? null, type = label?.type ?? null;
   // both labels on one line ("MFG 2026.01.15 EXP 2027.01.14"): keep only the expiry part
   const reOf = (t) => new RegExp(LABELS.filter((l) => l[2] === t).map((l) => l[0].source).join("|"), "g");
@@ -803,7 +811,7 @@ export function parseDate(text, opts = {}) {
   // strict: a wrong expiry entered silently is worse than no read. A digit run of 5+ glued to a
   // separator means the year is broken ("22027/03/31": label edge read as "2") -> no date.
   if (opts.strict && /\d{5,}[.\/\-年]|[.\/\-]\d{5,}/.test(s)) return null;
-  let cands = findCandidates(s, kind, opts.today || new Date(), !!time, /有效|保存期限|製造|生產|到期|民國|民国/.test(s));
+  let cands = findCandidates(s, kind, opts.today || new Date(), !!time, /有效|保存期限|製造|生產|到期|民國|民国/.test(s), foreign);
   if (opts.strict) cands = cands.filter((c) => !c.loose);
   if (!cands.length) return null;
   const r = cands[0];
@@ -833,9 +841,8 @@ function inferYear(m, d, today) {
 // All readings of every date-like token, best first.
 // Explicit forms (era, 年月日) beat bare digit groups; for bare digits every
 // order (YMD / DMY / MDY) is tried and judged by validity and plausibility.
-function findCandidates(s, kind, today, hasTime, taiwan = false) {
+function findCandidates(s, kind, today, hasTime, taiwan = false, foreign = false) {
   const out = [];
-  const foreign = /EXP|BB|BEST|USE/.test(s);
   const t0 = Date.UTC(today.getFullYear(), today.getMonth(), today.getDate());
   // loose = a reading that OCR noise produces easily ("2/8", "03/31"); dropped in strict mode
   const add = (y, m, d, order, base, loose = false) => {
@@ -916,7 +923,8 @@ function findCandidates(s, kind, today, hasTime, taiwan = false) {
       add(q(4, 4), q(0, 2), q(2, 2), "MDY", P.MDY + 0.5);
     } else {
       add(q(0, 2), q(2, 2), q(4, 2), "YMD", P.YMD);
-      add(q(4, 2), q(2, 2), q(0, 2), "DMY", P.DMY);
+      // "EXP 310326" (SE Asia, Europe): day first; unlabelled / Japanese "260331": year first
+      add(q(4, 2), q(2, 2), q(0, 2), "DMY", P.DMY + (foreign ? 1 : 0));
       add(q(4, 2), q(0, 2), q(2, 2), "MDY", P.MDY);
       // a 6-digit run can also be YYYYMM (202608)
       add(q(0, 4), q(4, 2), null, "YM", 1.5);
