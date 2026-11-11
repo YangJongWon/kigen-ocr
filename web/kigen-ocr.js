@@ -612,9 +612,12 @@ export function readRegion(model, img, opts = {}) {
   if (o.strict && best.date && (opts.recheck ?? RECHECK) && !((opts.agree ?? AGREE) && best.agree)) {
     // (a 2-of-3 tie-break with wider framing was tried: +2-9% right dates but up to 2x wrong ones,
     // the third read tends to repeat the first one's misread)
+    // the second look confirms when the same date is anywhere in it: its framing often glues junk
+    // to the ends ("2021.03.18時", "22021.04.02", "XP2022.01.08"), which used to throw away right
+    // reads (7:1 guide: 18 of 21 unstable rejections were right dates)
     const again = best.recheck();
-    if (again?.iso !== best.date.iso) {
-      best.rejected = { date: best.date, reason: "unstable", again: again?.iso ?? null };
+    if (!findDate([...again], best.date.iso, o.strict)) {
+      best.rejected = { date: best.date, reason: "unstable", again: parseDate(again, { strict: o.strict })?.iso ?? null };
       best.date = null;
     }
   }
@@ -628,17 +631,20 @@ export function readRegion(model, img, opts = {}) {
 // ("2027/03/31" also parses from "027/03/31"). Noise beside the date (label border, lot code)
 // no longer drags the score down.
 export function dateConf(text, probs, iso, strict = true) {
-  const c = [...text], n = c.length;
-  if (!probs || probs.length !== n) return null;
-  const mean = (a, b) => { let s = 0; for (let i = a; i < b; i++) s += probs[i]; return s / (b - a); };
-  for (let len = 1; len <= n; len++)
-    for (let a = 0; a + len <= n; a++) {
-      if (parseDate(c.slice(a, a + len).join(""), { strict })?.iso !== iso) continue;
-      let b = a + len;
-      while (a > 0 && /\d/.test(c[a]) && /\d/.test(c[a - 1])) a--;
-      while (b < n && /\d/.test(c[b - 1]) && /\d/.test(c[b])) b++;
-      return mean(a, b);
-    }
+  const c = [...text], n = c.length, sp = findDate(c, iso, strict);
+  if (!probs || probs.length !== n || !sp) return null;
+  let [a, b] = sp, s = 0;
+  while (a > 0 && /\d/.test(c[a]) && /\d/.test(c[a - 1])) a--;
+  while (b < n && /\d/.test(c[b - 1]) && /\d/.test(c[b])) b++;
+  for (let i = a; i < b; i++) s += probs[i];
+  return s / (b - a);
+}
+
+// shortest stretch [a, b) of chars c that parses to the date iso, or null
+function findDate(c, iso, strict) {
+  for (let len = 1; len <= c.length; len++)
+    for (let a = 0; a + len <= c.length; a++)
+      if (parseDate(c.slice(a, a + len).join(""), { strict })?.iso === iso) return [a, a + len];
   return null;
 }
 
@@ -771,7 +777,7 @@ function readGray(model, g, w, h, angle, o) {
       buf.set(g.subarray(sy * w + vx0, sy * w + vx1), y * cw);
     }
     const inp = toInput(buf, cw, nh, model);
-    return parseDate(recognize(model, inp.x, inp.w).text, { strict: o.strict });
+    return recognize(model, inp.x, inp.w).text;
   };
   // another read with different framing already gave the same date: a second look for free
   const same = (a, b) => a[0] === b[0] && a[1] === b[1];
