@@ -2,7 +2,8 @@
 // No dependencies. Works in browsers and Node (ES module).
 
 // ------------------------------------------------------------------ model
-// opts.wasm = false forces the plain-JS path (WebAssembly SIMD is used when available)
+// opts.wasm = false forces the plain-JS path (WebAssembly SIMD is used when available);
+// opts.int8 = false keeps the wasm float GEMM instead of int8 weights x int16 activations
 export async function loadModel(src, opts = {}) {
   const buf = src instanceof ArrayBuffer ? src : await (await fetch(src)).arrayBuffer();
   const hl = new DataView(buf).getUint32(0, true);
@@ -14,29 +15,33 @@ export async function loadModel(src, opts = {}) {
     const s = new Float32Array(buf.slice(base + l.s[0], base + l.s[0] + l.s[1] * 4));
     l.b = new Float32Array(buf.slice(base + l.b[0], base + l.b[0] + l.b[1] * 4));
     const per = q.length / s.length;
+    l.q = q; l.s = s; // int8 weights, one scale per output channel
     l.w = new Float32Array(q.length);
     for (let i = 0; i < q.length; i++) l.w[i] = q[i] * s[(i / per) | 0];
   }
-  if (opts.wasm !== false) meta.wa = wasmInit(meta);
+  if (opts.wasm !== false) meta.wa = wasmInit(meta, opts.int8 !== false);
   return meta;
 }
 
 // ------------------------------------------------------------------ WebAssembly SIMD GEMM
 // web/gemm.wat, compiled and embedded by tools/build-wasm.mjs. ~4-5x faster than the JS GEMM.
-const GEMM_WASM = "AGFzbQEAAAABDAFgCH9/f39/f39/AAMCAQAFAwEAAQcOAgNtZW0CAARnZW1tAAAK4AgB3QgCDH8TeyAFQQJ0IRAgA0ECdCERIAcEe0MAAAAA/RMFQwAAgP/9EwshJkEAIQgCQANAIAggAk8NASABIAhBAnRqIRMgEyoCAP0TISIgEyoCBP0TISMgEyoCCP0TISQgEyoCDP0TISVBACEJAkADQCAJQQhqIAVLDQH9DAAAAAAAAAAAAAAAAAAAAAAhGv0MAAAAAAAAAAAAAAAAAAAAACEb/QwAAAAAAAAAAAAAAAAAAAAAIRz9DAAAAAAAAAAAAAAAAAAAAAAhHf0MAAAAAAAAAAAAAAAAAAAAACEe/QwAAAAAAAAAAAAAAAAAAAAAIR/9DAAAAAAAAAAAAAAAAAAAAAAhIP0MAAAAAAAAAAAAAAAAAAAAACEhIAAgCCARbGohCyALIBFqIQwgDCARaiENIA0gEWohDiAEIAlBAnRqIQ8gAyEKA0AgD/0ABAAhFCAP/QAEECEVIAsqAgD9EyEWIAwqAgD9EyEXIA0qAgD9EyEYIA4qAgD9EyEZIBogFiAU/eYB/eQBIRogGyAWIBX95gH95AEhGyAcIBcgFP3mAf3kASEcIB0gFyAV/eYB/eQBIR0gHiAYIBT95gH95AEhHiAfIBggFf3mAf3kASEfICAgGSAU/eYB/eQBISAgISAZIBX95gH95AEhISALQQRqIQsgDEEEaiEMIA1BBGohDSAOQQRqIQ4gDyAQaiEPIApBAWshCiAKDQALIAYgCCAQbCAJQQJ0amohEiASIBogIv3kASAm/ekB/QsEACASIBsgIv3kASAm/ekB/QsEECASIBBqIRIgEiAcICP95AEgJv3pAf0LBAAgEiAdICP95AEgJv3pAf0LBBAgEiAQaiESIBIgHiAk/eQBICb96QH9CwQAIBIgHyAk/eQBICb96QH9CwQQIBIgEGohEiASICAgJf3kASAm/ekB/QsEACASICEgJf3kASAm/ekB/QsEECAJQQhqIQkMAAsLIAkgBUkEQP0MAAAAAAAAAAAAAAAAAAAAACEa/QwAAAAAAAAAAAAAAAAAAAAAIRz9DAAAAAAAAAAAAAAAAAAAAAAhHv0MAAAAAAAAAAAAAAAAAAAAACEgIAAgCCARbGohCyALIBFqIQwgDCARaiENIA0gEWohDiAEIAlBAnRqIQ8gAyEKA0AgD/0ABAAhFCAaIAsqAgD9EyAU/eYB/eQBIRogHCAMKgIA/RMgFP3mAf3kASEcIB4gDSoCAP0TIBT95gH95AEhHiAgIA4qAgD9EyAU/eYB/eQBISAgC0EEaiELIAxBBGohDCANQQRqIQ0gDkEEaiEOIA8gEGohDyAKQQFrIQogCg0ACyAGIAggEGwgCUECdGpqIRIgEiAaICL95AEgJv3pAf0LBAAgEiAQaiESIBIgHCAj/eQBICb96QH9CwQAIBIgEGohEiASIB4gJP3kASAm/ekB/QsEACASIBBqIRIgEiAgICX95AEgJv3pAf0LBAALIAhBBGohCAwACwsL";
+const GEMM_WASM = "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";
 
-function wasmInit(model) {
+function wasmInit(model, int8) {
   try {
     if (typeof WebAssembly !== "object" || !GEMM_WASM) return null;
     const bytes = Uint8Array.from(atob(GEMM_WASM), (c) => c.charCodeAt(0));
     if (!WebAssembly.validate(bytes)) return null; // no SIMD (very old browser)
     const inst = new WebAssembly.Instance(new WebAssembly.Module(bytes), {});
-    const wa = { mem: inst.exports.mem, gemm: inst.exports.gemm, top: 0 };
+    const wa = { mem: inst.exports.mem, gemm: inst.exports.gemm, gemm8: inst.exports.gemm8,
+      absmax: inst.exports.absmax, im2colq: inst.exports.im2colq,
+      quantpad: inst.exports.quantpad, int8, top: 0 };
     // weights (rows padded to a multiple of 4) and biases live in wasm memory for good
     let need = 0;
     for (const l of model.layers) if (l.w) {
       const O4 = Math.ceil(l.shape[0] / 4) * 4;
-      need += (l.w.length / l.shape[0]) * O4 * 4 + O4 * 4;
+      const K = l.w.length / l.shape[0];
+      need += K * O4 * 4 + O4 * 4 + (int8 ? Math.ceil(K / 2) * O4 * 4 + O4 * 4 : 0);
     }
     wasmReserve(wa, need);
     let at = 0;
@@ -45,6 +50,16 @@ function wasmInit(model) {
       const O = l.shape[0], O4 = Math.ceil(O / 4) * 4, K = l.w.length / O;
       l.wofs = at; f.set(l.w, at / 4); at += O4 * K * 4;
       l.bofs = at; f.set(l.b, at / 4); at += O4 * 4;
+      if (int8) { // rows of (even k, odd k) int16 pairs packed in one int32 word
+        const KH = Math.ceil(K / 2), u = new Int32Array(wa.mem.buffer, at, O4 * KH);
+        for (let o = 0; o < O; o++)
+          for (let j = 0; j < KH; j++) {
+            const lo = l.q[o * K + 2 * j], hi = 2 * j + 1 < K ? l.q[o * K + 2 * j + 1] : 0;
+            u[o * KH + j] = (lo & 0xffff) | (hi << 16);
+          }
+        l.qofs = at; at += O4 * KH * 4;
+        l.sofs = at; f.set(l.s, at / 4); at += O4 * 4;
+      }
     }
     wa.top = at;
     return wa;
@@ -60,15 +75,45 @@ function wasmReserve(wa, bytes) {
 
 let WA = null; // wasm context of the model being run (set by recognize)
 
-// im2col buffer: zeroed, in wasm memory when the wasm GEMM will consume it
-function colBuffer(n, outN) {
-  if (!WA) return new Float32Array(n);
-  wasmReserve(WA, WA.top + n * 4 + outN * 4 + 64);
-  const col = new Float32Array(WA.mem.buffer, WA.top, n);
+// float im2col buffer (K rows of P4): zeroed, in wasm memory when the wasm float GEMM will
+// consume it (the int8 path builds its own, see wasmConv8)
+function colBuffer(K, P4, O) {
+  if (!WA) return new Float32Array(K * P4);
+  wasmReserve(WA, WA.top + K * P4 * 4 + Math.ceil(O / 4) * 4 * P4 * 4 + 64);
+  const col = new Float32Array(WA.mem.buffer, WA.top, K * P4);
   col.fill(0);
   return col;
 }
 
+const QMAX = 4095; // int16 activation range: keeps the int32 sums exact (see gemm.wat)
+
+// Whole int8 convolution in wasm: input copied in and quantized once to int16 (with a zero
+// border = the padding), im2col of the int16 values, int8 GEMM. kh x kw taps, column dilation
+// dil, padding ph/pw. Returns out[O][Ho*Wo].
+const al16 = (n) => Math.ceil(n / 16) * 16;
+function wasmConv8(L, inp, C, H, W, kh, kw, ph, pw, dil, Ho, Wo, relu) {
+  const O = L.shape[0], O4 = Math.ceil(O / 4) * 4, K = C * kh * kw, K2 = K + (K & 1);
+  const P = Ho * Wo, P4 = Math.ceil(P / 4) * 4, n4 = Math.ceil(inp.length / 4) * 4;
+  const Hp = H + 2 * ph, Wp = W + 2 * pw;
+  const inAt = WA.top, qinAt = inAt + n4 * 4, zeroAt = qinAt + al16(C * Hp * Wp * 2) + 64;
+  const qAt = zeroAt + 64, outAt = qAt + al16((K2 / 2) * P4 * 4) + 64;
+  wasmReserve(WA, outAt + O4 * P4 * 4 + 64);
+  const f = new Float32Array(WA.mem.buffer, inAt, n4);
+  f.set(inp);
+  if (n4 > inp.length) f.fill(0, inp.length);
+  new Uint8Array(WA.mem.buffer, zeroAt - 64, 128).fill(0);
+  const mx = WA.absmax(inAt, n4), sa = mx > 0 ? mx / QMAX : 1;
+  WA.quantpad(inAt, C, H, W, ph, pw, qinAt, 1 / sa);
+  WA.im2colq(qinAt, C, Hp, Wp, kh, kw, dil, Ho, Wo, P4, qAt, zeroAt);
+  WA.gemm8(L.qofs, L.sofs, sa, L.bofs, O4, K2 / 2, qAt, P4, outAt, relu ? 1 : 0);
+  const res = new Float32Array(WA.mem.buffer, outAt, O4 * P4);
+  if (P === P4) return res.slice(0, O * P);
+  const out = new Float32Array(O * P);
+  for (let o = 0; o < O; o++) out.set(res.subarray(o * P4, o * P4 + P), o * P);
+  return out;
+}
+
+// float GEMM of an im2col buffer: wasm SIMD when available, else plain JS
 function runGemm(L, O, K, col, P, P4, relu) {
   if (!WA) {
     const out = gemm(padW(L, K), L.b, O, K, col, P, P4);
@@ -133,7 +178,8 @@ function padW(L, K) { // weights padded to a multiple of 4 output rows (cached)
 function conv2d(inp, C, H, W, L) {
   const [O, , kh, kw] = L.shape, [ph, pw] = L.pad;
   const Ho = H + 2 * ph - kh + 1, Wo = W + 2 * pw - kw + 1, P = Ho * Wo, P4 = Math.ceil(P / 4) * 4;
-  const K = C * kh * kw, col = colBuffer(K * P4, Math.ceil(O / 4) * 4 * P4);
+  if (WA?.int8) return [wasmConv8(L, inp, C, H, W, kh, kw, ph, pw, 1, Ho, Wo, true), O, Ho, Wo];
+  const K = C * kh * kw, col = colBuffer(K, P4, O);
   for (let c = 0; c < C; c++)
     for (let i = 0; i < kh; i++)
       for (let j = 0; j < kw; j++) {
@@ -166,7 +212,13 @@ function maxpool(a, C, H, W, kh, kw) {
 }
 
 function conv1d(a, C, T, L, dil, residual) { // kernel 3 (res) or 1 (fc)
-  const [O, , k] = L.shape, T4 = Math.ceil(T / 4) * 4, K = C * k, col = colBuffer(K * T4, Math.ceil(O / 4) * 4 * T4);
+  const [O, , k] = L.shape;
+  if (WA?.int8) {
+    const out = wasmConv8(L, a, C, 1, T, 1, k, 0, ((k - 1) / 2) * dil, dil, 1, T, false);
+    if (residual) for (let i = 0; i < out.length; i++) { const v = out[i] + a[i]; out[i] = v > 0 ? v : 0; }
+    return out;
+  }
+  const T4 = Math.ceil(T / 4) * 4, K = C * k, col = colBuffer(K, T4, O);
   for (let c = 0; c < C; c++)
     for (let t = 0; t < k; t++) {
       const off = (t - (k - 1) / 2) * dil, row = (c * k + t) * T4;
@@ -190,16 +242,32 @@ export function recognize(model, x, w) {
   }
   // a: (V,T) logits -> greedy CTC
   const V = C, T = W, vocab = model.vocab;
-  let s = "", prev = 0, confSum = 0, n = 0, minConf = 1;
+  const ch = [], pr = [];
+  let prev = 0, confSum = 0, n = 0, minConf = 1;
+  // argmax per time step, scanning the (V, T) logits row by row (contiguous reads)
+  const bestV = new Int32Array(T), bestL = a.slice(0, T);
+  for (let v = 1; v < V; v++) {
+    const r = v * T;
+    for (let t = 0; t < T; t++) if (a[r + t] > bestL[t]) { bestL[t] = a[r + t]; bestV[t] = v; }
+  }
   for (let t = 0; t < T; t++) {
-    let best = 0, bv = -Infinity, sum = 0;
-    for (let v = 0; v < V; v++) if (a[v * T + t] > bv) { bv = a[v * T + t]; best = v; }
-    for (let v = 0; v < V; v++) sum += Math.exp(a[v * T + t] - bv);
-    const p = 1 / sum;
-    if (best !== 0 && best !== prev) { s += vocab[best]; confSum += p; n++; if (p < minConf) minConf = p; }
+    const best = bestV[t], bv = bestL[t];
+    if (best !== 0 && best !== prev) { // softmax only where a character is emitted
+      let sum = 0;
+      for (let v = 0; v < V; v++) sum += Math.exp(a[v * T + t] - bv);
+      const p = 1 / sum;
+      ch.push(vocab[best]); pr.push(p); confSum += p; n++; if (p < minConf) minConf = p;
+    }
     prev = best;
   }
-  return { text: s.split(/\s+/).filter(Boolean).join(" "), conf: n ? confSum / n : 0, minConf: n ? minConf : 0 };
+  // collapse whitespace; probs[i] stays aligned with [...text][i]
+  let text = "";
+  const probs = [];
+  for (let i = 0; i < ch.length; i++) {
+    if (/\s/.test(ch[i])) { if (!text || /\s/.test(ch[i + 1] ?? " ")) continue; }
+    for (const c of ch[i]) { text += /\s/.test(c) ? " " : c; probs.push(pr[i]); }
+  }
+  return { text, conf: n ? confSum / n : 0, minConf: n ? minConf : 0, probs };
 }
 
 // ------------------------------------------------------------------ preprocessing
@@ -476,12 +544,13 @@ const weak = (r) => !r.date || r.date.order === "MD" || r.conf < 0.6;
 export function readRegion(model, img, opts = {}) {
   const o = { strict: opts.strict ?? true, minConf: opts.minConf ?? MIN_CONF };
   const best = readTurns(model, img, o);
+  best.dateConf = best.date ? dateConf(best.text, best.probs, best.date.iso, o.strict) : null;
   // only a manufacturing date was found: never hand it out as the expiry
   if (o.strict && best.date?.type === "production") {
     best.rejected = { date: best.date, reason: "production" };
     best.date = null;
   }
-  if (o.strict && best.date && best.conf < o.minConf) {
+  if (o.strict && best.date && best.dateConf < o.minConf) {
     best.rejected = { date: best.date, reason: "lowconf" };
     best.date = null;
   }
@@ -494,8 +563,29 @@ export function readRegion(model, img, opts = {}) {
   return best;
 }
 
-// mean char confidence cut: on ExpDate photos and wide-reticle crops it removes ~20% of the
-// wrong dates for ~0.3% of the right ones (min-char confidence cost more right ones)
+// Mean confidence of only the characters the date was read from: the shortest stretch of the
+// text that still parses to the same date ("2令8.3.15" -> "令8.3.15", "R9.3.31-" -> "R9.3.31"),
+// widened over digits glued to its ends so a shaky first year digit still counts
+// ("2027/03/31" also parses from "027/03/31"). Noise beside the date (label border, lot code)
+// no longer drags the score down.
+export function dateConf(text, probs, iso, strict = true) {
+  const c = [...text], n = c.length;
+  if (!probs || probs.length !== n) return null;
+  const mean = (a, b) => { let s = 0; for (let i = a; i < b; i++) s += probs[i]; return s / (b - a); };
+  for (let len = 1; len <= n; len++)
+    for (let a = 0; a + len <= n; a++) {
+      if (parseDate(c.slice(a, a + len).join(""), { strict })?.iso !== iso) continue;
+      let b = a + len;
+      while (a > 0 && /\d/.test(c[a]) && /\d/.test(c[a - 1])) a--;
+      while (b < n && /\d/.test(c[b - 1]) && /\d/.test(c[b])) b++;
+      return mean(a, b);
+    }
+  return null;
+}
+
+// confidence cut on the date characters (dateConf). On ExpDate tight and wide crops it gives the
+// same right/wrong counts as the whole-line mean at 0.8; at 0.9 it keeps more right reads
+// whose line carries junk ("2令8.3.15", "2021.04.18 까").
 const MIN_CONF = 0.8;
 // second look on by default: on ExpDate photos it cut wrong dates 4.1% -> 1.2% for 1.8% fewer
 // right ones. In camera mode a missed frame is cheap (the next frame retries), a wrong date is not.

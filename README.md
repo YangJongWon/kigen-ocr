@@ -53,7 +53,7 @@ const r = readRegion(model, { data: rgbaBytes, width, height }); // ImageData-li
 | option | default | |
 |---|---|---|
 | `strict` | `true` | drop readings OCR noise produces easily (see below) |
-| `minConf` | `0.8` | strict mode: reject results below this mean character confidence |
+| `minConf` | `0.8` | strict mode: reject results whose `dateConf` is below this |
 | `recheck` | `true` | strict mode: read the chosen line a second time with slightly different framing, reject if the date differs |
 
 Result:
@@ -63,6 +63,8 @@ Result:
 | `date` | parsed date (see `parseDate`) or `null` |
 | `rejected` | when strict mode dropped a reading: `{ date, reason }`, reason `"lowconf"` or `"unstable"` |
 | `text`, `conf` | raw recognized text and mean character confidence of the chosen line |
+| `dateConf` | mean confidence of only the characters the date was read from (`"2令8.3.15-"` → `令8.3.15`), so junk beside the date does not lower it; `null` when no date was found. Use this, not `conf`, to judge a date |
+| `probs` | per-character confidence, aligned with `[...text]` |
 | `skew`, `turn` | degrees the text was straightened by, and the extra 90/180/270° turn if one was needed |
 | `lines`, `band`, `cols` | detected text lines and the area that was read (in the straightened image) |
 | `candidates` | every area that was read, with its text and confidence |
@@ -108,7 +110,7 @@ Kanji month-day (`11月9日`) and anything with a 4-digit year or an era are kep
 
 Tilted / turned copies of the product photos (10°–270°) read at roughly 70–89% with 0–2.5% wrong dates (measured with the previous model). ExpDate is mostly numeric and English dates, so Japanese formats are only covered by synthetic tests; real Japanese label photos have not been benchmarked yet.
 
-Speed (PC, single thread, Node 24): ~50 ms for a tight crop, ~200 ms for a wide box with neighbouring lines (one 256 px line: ~27 ms). The convolutions run in a small WebAssembly SIMD kernel embedded in `kigen-ocr.js` (`web/gemm.wat`); where WebAssembly SIMD is unavailable it falls back to plain JS (~4x slower, same results). Not measured on phones.
+Speed (PC, single thread, Node 24): ~32 ms for a tight crop, ~130 ms for a wide box with neighbouring lines (one 256 px line: ~14 ms). The convolutions run in a small WebAssembly SIMD kernel embedded in `kigen-ocr.js` (`web/gemm.wat`): each layer input is quantized once to 13-bit integers, unfolded (im2col) and multiplied by the int8 weights with `i32x4.dot_i16x8_s` (exact int32 sums). `loadModel(src, { int8: false })` uses a float32 SIMD kernel instead (~2x slower, same accuracy); without WebAssembly SIMD it falls back to plain JS (~9x slower). Not measured on phones.
 
 ## Limitations
 

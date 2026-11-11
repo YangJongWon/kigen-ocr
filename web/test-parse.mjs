@@ -1,4 +1,4 @@
-import { parseDate } from "./kigen-ocr.js";
+import { parseDate, dateConf } from "./kigen-ocr.js";
 
 const cases = [
   ["賞味期限 2025.12.31", "2025-12-31", "賞味期限"],
@@ -221,6 +221,18 @@ for (const [t, want] of strictCases) {
   const ok = (r ? r.iso : null) === want;
   if (!ok) fail++;
   console.log(ok ? "ok  " : "FAIL", "[strict]", t, "->", JSON.stringify(r?.iso ?? null));
+}
+// dateConf: only the characters the date came from count
+const confCases = [
+  ["2令8.3.15", [0.4, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9], "2026-03-15", 0.9],
+  ["R9.3.31-", [0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.2], "2027-03-31", 0.9],
+  ["2027/03/31", [0.5, 1, 1, 1, 1, 1, 1, 1, 1, 1], "2027-03-31", 0.95], // glued year digit counts
+];
+for (const [t, p, iso, want] of confCases) {
+  const v = dateConf(t, p, iso);
+  const ok = Math.abs(v - want) < 1e-9;
+  if (!ok) fail++;
+  console.log(ok ? "ok  " : "FAIL", "[dateConf]", t, "->", v);
 }
 console.log(fail ? `${fail} failed` : "all passed");
 process.exit(fail ? 1 : 0);
