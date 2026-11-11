@@ -108,7 +108,7 @@ Kanji month-day (`11月9日`) and anything with a 4-digit year or an era are kep
 
 Tilted / turned copies of the product photos (10°–270°) read at roughly 70–89% with 0–2.5% wrong dates (measured with the previous model). ExpDate is mostly numeric and English dates, so Japanese formats are only covered by synthetic tests; real Japanese label photos have not been benchmarked yet.
 
-Speed (PC, single thread): ~250 ms for a tight crop, ~400–500 ms for a wide box, up to ~1 s when the text has to be turned. Not measured on phones.
+Speed (PC, single thread, Node 24): ~50 ms for a tight crop, ~200 ms for a wide box with neighbouring lines (one 256 px line: ~27 ms). The convolutions run in a small WebAssembly SIMD kernel embedded in `kigen-ocr.js` (`web/gemm.wat`); where WebAssembly SIMD is unavailable it falls back to plain JS (~4x slower, same results). Not measured on phones.
 
 ## Limitations
 
@@ -126,6 +126,8 @@ uv run python run_train.py --init model.pt --lr 5e-4 --steps 6000 --out model_ft
 uv run python export.py --ckpt model.pt           # -> web/kigen.bin, web/fixture.json
 node web/test-parse.mjs && node web/test-model.mjs
 ```
+
+After editing `web/gemm.wat`, rebuild the embedded kernel with `npm install && node tools/build-wasm.mjs` (needs the `wabt` dev dependency).
 
 `gen.py` uses Windows fonts from `C:/Windows/Fonts` (MS Gothic/Mincho, Meiryo, Yu Gothic, BIZ UD, UD Digi Kyokasho, Noto Sans JP, and Latin fonts); adjust the paths on other systems. No font files are distributed.
 

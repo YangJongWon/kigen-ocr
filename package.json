@@ -8,6 +8,7 @@
     "test": "node web/test-parse.mjs && node web/test-model.mjs"
   },
   "devDependencies": {
-    "jpeg-js": "^0.4.4"
+    "jpeg-js": "^0.4.4",
+    "wabt": "^1.0.36"
   }
 }

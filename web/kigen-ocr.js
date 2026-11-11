@@ -2,7 +2,8 @@
 // No dependencies. Works in browsers and Node (ES module).
 
 // ------------------------------------------------------------------ model
-export async function loadModel(src) {
+// opts.wasm = false forces the plain-JS path (WebAssembly SIMD is used when available)
+export async function loadModel(src, opts = {}) {
   const buf = src instanceof ArrayBuffer ? src : await (await fetch(src)).arrayBuffer();
   const hl = new DataView(buf).getUint32(0, true);
   const meta = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, hl)));
@@ -16,7 +17,71 @@ export async function loadModel(src) {
     l.w = new Float32Array(q.length);
     for (let i = 0; i < q.length; i++) l.w[i] = q[i] * s[(i / per) | 0];
   }
+  if (opts.wasm !== false) meta.wa = wasmInit(meta);
   return meta;
+}
+
+// ------------------------------------------------------------------ WebAssembly SIMD GEMM
+// web/gemm.wat, compiled and embedded by tools/build-wasm.mjs. ~4-5x faster than the JS GEMM.
+const GEMM_WASM = "AGFzbQEAAAABDAFgCH9/f39/f39/AAMCAQAFAwEAAQcOAgNtZW0CAARnZW1tAAAK4AgB3QgCDH8TeyAFQQJ0IRAgA0ECdCERIAcEe0MAAAAA/RMFQwAAgP/9EwshJkEAIQgCQANAIAggAk8NASABIAhBAnRqIRMgEyoCAP0TISIgEyoCBP0TISMgEyoCCP0TISQgEyoCDP0TISVBACEJAkADQCAJQQhqIAVLDQH9DAAAAAAAAAAAAAAAAAAAAAAhGv0MAAAAAAAAAAAAAAAAAAAAACEb/QwAAAAAAAAAAAAAAAAAAAAAIRz9DAAAAAAAAAAAAAAAAAAAAAAhHf0MAAAAAAAAAAAAAAAAAAAAACEe/QwAAAAAAAAAAAAAAAAAAAAAIR/9DAAAAAAAAAAAAAAAAAAAAAAhIP0MAAAAAAAAAAAAAAAAAAAAACEhIAAgCCARbGohCyALIBFqIQwgDCARaiENIA0gEWohDiAEIAlBAnRqIQ8gAyEKA0AgD/0ABAAhFCAP/QAEECEVIAsqAgD9EyEWIAwqAgD9EyEXIA0qAgD9EyEYIA4qAgD9EyEZIBogFiAU/eYB/eQBIRogGyAWIBX95gH95AEhGyAcIBcgFP3mAf3kASEcIB0gFyAV/eYB/eQBIR0gHiAYIBT95gH95AEhHiAfIBggFf3mAf3kASEfICAgGSAU/eYB/eQBISAgISAZIBX95gH95AEhISALQQRqIQsgDEEEaiEMIA1BBGohDSAOQQRqIQ4gDyAQaiEPIApBAWshCiAKDQALIAYgCCAQbCAJQQJ0amohEiASIBogIv3kASAm/ekB/QsEACASIBsgIv3kASAm/ekB/QsEECASIBBqIRIgEiAcICP95AEgJv3pAf0LBAAgEiAdICP95AEgJv3pAf0LBBAgEiAQaiESIBIgHiAk/eQBICb96QH9CwQAIBIgHyAk/eQBICb96QH9CwQQIBIgEGohEiASICAgJf3kASAm/ekB/QsEACASICEgJf3kASAm/ekB/QsEECAJQQhqIQkMAAsLIAkgBUkEQP0MAAAAAAAAAAAAAAAAAAAAACEa/QwAAAAAAAAAAAAAAAAAAAAAIRz9DAAAAAAAAAAAAAAAAAAAAAAhHv0MAAAAAAAAAAAAAAAAAAAAACEgIAAgCCARbGohCyALIBFqIQwgDCARaiENIA0gEWohDiAEIAlBAnRqIQ8gAyEKA0AgD/0ABAAhFCAaIAsqAgD9EyAU/eYB/eQBIRogHCAMKgIA/RMgFP3mAf3kASEcIB4gDSoCAP0TIBT95gH95AEhHiAgIA4qAgD9EyAU/eYB/eQBISAgC0EEaiELIAxBBGohDCANQQRqIQ0gDkEEaiEOIA8gEGohDyAKQQFrIQogCg0ACyAGIAggEGwgCUECdGpqIRIgEiAaICL95AEgJv3pAf0LBAAgEiAQaiESIBIgHCAj/eQBICb96QH9CwQAIBIgEGohEiASIB4gJP3kASAm/ekB/QsEACASIBBqIRIgEiAgICX95AEgJv3pAf0LBAALIAhBBGohCAwACwsL";
+
+function wasmInit(model) {
+  try {
+    if (typeof WebAssembly !== "object" || !GEMM_WASM) return null;
+    const bytes = Uint8Array.from(atob(GEMM_WASM), (c) => c.charCodeAt(0));
+    if (!WebAssembly.validate(bytes)) return null; // no SIMD (very old browser)
+    const inst = new WebAssembly.Instance(new WebAssembly.Module(bytes), {});
+    const wa = { mem: inst.exports.mem, gemm: inst.exports.gemm, top: 0 };
+    // weights (rows padded to a multiple of 4) and biases live in wasm memory for good
+    let need = 0;
+    for (const l of model.layers) if (l.w) {
+      const O4 = Math.ceil(l.shape[0] / 4) * 4;
+      need += (l.w.length / l.shape[0]) * O4 * 4 + O4 * 4;
+    }
+    wasmReserve(wa, need);
+    let at = 0;
+    const f = new Float32Array(wa.mem.buffer);
+    for (const l of model.layers) if (l.w) {
+      const O = l.shape[0], O4 = Math.ceil(O / 4) * 4, K = l.w.length / O;
+      l.wofs = at; f.set(l.w, at / 4); at += O4 * K * 4;
+      l.bofs = at; f.set(l.b, at / 4); at += O4 * 4;
+    }
+    wa.top = at;
+    return wa;
+  } catch {
+    return null;
+  }
+}
+
+function wasmReserve(wa, bytes) {
+  const have = wa.mem.buffer.byteLength;
+  if (bytes > have) wa.mem.grow(Math.ceil((bytes - have) / 65536));
+}
+
+let WA = null; // wasm context of the model being run (set by recognize)
+
+// im2col buffer: zeroed, in wasm memory when the wasm GEMM will consume it
+function colBuffer(n, outN) {
+  if (!WA) return new Float32Array(n);
+  wasmReserve(WA, WA.top + n * 4 + outN * 4 + 64);
+  const col = new Float32Array(WA.mem.buffer, WA.top, n);
+  col.fill(0);
+  return col;
+}
+
+function runGemm(L, O, K, col, P, P4, relu) {
+  if (!WA) {
+    const out = gemm(padW(L, K), L.b, O, K, col, P, P4);
+    if (relu) for (let i = 0; i < out.length; i++) if (out[i] < 0) out[i] = 0;
+    return out;
+  }
+  const O4 = Math.ceil(O / 4) * 4, outAt = WA.top + Math.ceil(K * P4 / 4) * 16;
+  WA.gemm(L.wofs, L.bofs, O4, K, WA.top, P4, outAt, relu ? 1 : 0);
+  const res = new Float32Array(WA.mem.buffer, outAt, O4 * P4);
+  if (P === P4) return res.slice(0, O * P);
+  const out = new Float32Array(O * P);
+  for (let o = 0; o < O; o++) out.set(res.subarray(o * P4, o * P4 + P), o * P);
+  return out;
 }
 
 // out[O][P] = W[O4][K] * col[K][P4] + b, register-tiled 4x4. W rows padded to O4, col to P4.
@@ -68,7 +133,7 @@ function padW(L, K) { // weights padded to a multiple of 4 output rows (cached)
 function conv2d(inp, C, H, W, L) {
   const [O, , kh, kw] = L.shape, [ph, pw] = L.pad;
   const Ho = H + 2 * ph - kh + 1, Wo = W + 2 * pw - kw + 1, P = Ho * Wo, P4 = Math.ceil(P / 4) * 4;
-  const K = C * kh * kw, col = new Float32Array(K * P4);
+  const K = C * kh * kw, col = colBuffer(K * P4, Math.ceil(O / 4) * 4 * P4);
   for (let c = 0; c < C; c++)
     for (let i = 0; i < kh; i++)
       for (let j = 0; j < kw; j++) {
@@ -81,9 +146,7 @@ function conv2d(inp, C, H, W, L) {
           for (let x = x0; x < x1; x++) col[ro + x] = inp[so + x];
         }
       }
-  const out = gemm(padW(L, K), L.b, O, K, col, P, P4);
-  for (let i = 0; i < out.length; i++) if (out[i] < 0) out[i] = 0;
-  return [out, O, Ho, Wo];
+  return [runGemm(L, O, K, col, P, P4, true), O, Ho, Wo];
 }
 
 function maxpool(a, C, H, W, kh, kw) {
@@ -103,20 +166,21 @@ function maxpool(a, C, H, W, kh, kw) {
 }
 
 function conv1d(a, C, T, L, dil, residual) { // kernel 3 (res) or 1 (fc)
-  const [O, , k] = L.shape, T4 = Math.ceil(T / 4) * 4, K = C * k, col = new Float32Array(K * T4);
+  const [O, , k] = L.shape, T4 = Math.ceil(T / 4) * 4, K = C * k, col = colBuffer(K * T4, Math.ceil(O / 4) * 4 * T4);
   for (let c = 0; c < C; c++)
     for (let t = 0; t < k; t++) {
       const off = (t - (k - 1) / 2) * dil, row = (c * k + t) * T4;
       const lo = Math.max(0, -off), hi = Math.min(T, T - off);
       for (let x = lo; x < hi; x++) col[row + x] = a[c * T + x + off];
     }
-  const out = gemm(padW(L, K), L.b, O, K, col, T, T4);
+  const out = runGemm(L, O, K, col, T, T4, false);
   if (residual) for (let i = 0; i < out.length; i++) { const v = out[i] + a[i]; out[i] = v > 0 ? v : 0; }
   return out;
 }
 
 // x: Float32Array(32*w) in [0,1] -> {text, conf, probs}
 export function recognize(model, x, w) {
+  WA = model.wa ?? null;
   let a = x, C = 1, H = model.h, W = w;
   for (const l of model.layers) {
     if (l.op === "conv2d") [a, C, H, W] = conv2d(a, C, H, W, l);
@@ -326,17 +390,34 @@ function crop(g, w, y0, y1, x0 = 0, x1 = w) {
 
 // Skew of the text in degrees (-90..90): the angle at which strong-edge points, projected
 // onto the vertical axis, pile up into the sharpest row histogram (text lines horizontal).
+// k-th smallest value (quickselect; reorders a)
+function kth(a, k) {
+  let lo = 0, hi = a.length - 1;
+  while (lo < hi) {
+    const piv = a[(lo + hi) >> 1];
+    let i = lo, j = hi;
+    while (i <= j) {
+      while (a[i] < piv) i++;
+      while (a[j] > piv) j--;
+      if (i <= j) { const t = a[i]; a[i] = a[j]; a[j] = t; i++; j--; }
+    }
+    if (k <= j) hi = j; else if (k >= i) lo = i; else return a[k];
+  }
+  return a[k];
+}
+
 const SKEW_MAX = 90; // line direction is defined modulo 180°; up/down is settled by readRegion
 export function estimateSkew(g, w, h) {
-  const mag = [];
+  const mag = new Float32Array(Math.max(0, (w - 2) * (h - 2)));
+  let n = 0;
   for (let y = 1; y < h - 1; y++)
     for (let x = 1; x < w - 1; x++) {
       const i = y * w + x, m = Math.abs(g[i + 1] - g[i - 1]) + Math.abs(g[i + w] - g[i - w]);
-      if (m > 0) mag.push(m);
+      if (m > 0) mag[n++] = m;
     }
-  if (mag.length < 50) return 0;
-  const th = Float32Array.from(mag).sort()[Math.floor(mag.length * 0.85)];
-  const step = Math.max(1, Math.round(Math.sqrt(mag.length * 0.15 / 4000)));
+  if (n < 50) return 0;
+  const th = kth(mag.subarray(0, n), Math.floor(n * 0.85)); // = sorted[k], without sorting
+  const step = Math.max(1, Math.round(Math.sqrt(n * 0.15 / 4000)));
   const px = [], py = [], cx = w / 2, cy = h / 2;
   for (let y = 1; y < h - 1; y += step)
     for (let x = 1; x < w - 1; x += step) {
