@@ -772,7 +772,7 @@ const weak = (r) => !r.date || r.date.order === "MD" || r.conf < 0.6;
 // A dropped date is kept in `rejected` ({date, reason}) so the UI can ask for a retake.
 export function readRegion(model, img, opts = {}) {
   const o = { strict: opts.strict ?? true, minConf: opts.minConf ?? MIN_CONF, focus: opts.focus, strips: opts.strips,
-    det: opts.det, detConf: opts.detConf };
+    det: opts.det, detConf: opts.detConf, detCentre: opts.detCentre, detWiden: opts.detWiden };
   const best = readTurns(model, img, o);
   best.dateConf = best.date ? dateConf(best.text, best.probs, best.date.iso, o.strict) : null;
   // only a manufacturing date was found: never hand it out as the expiry
@@ -857,6 +857,7 @@ function readTurns(model, img, o) {
 // Read with the text straightened by `angle` degrees (any angle; |angle| < 3 is left as is).
 function readGray(model, g, w, h, angle, o) {
   const skew = ((angle % 360) + 540) % 360 - 180; // -> [-180, 180)
+  const w0 = w, h0 = h; // frame size before straightening
   if (Math.abs(skew) >= 3) ({ g, w, h } = rotateGray(g, w, h, skew));
   const lines = textLines(g, w, h);
   const cands = [[0, h]];
@@ -886,10 +887,30 @@ function readGray(model, g, w, h, angle, o) {
   // skips the rule-based search below (every candidate line, strips, trims, focus).
   let fast = false;
   if (o.det) {
-    const d = detectDate(o.det, g, w, h);
+    // Straightening grows the canvas (45°: 972x404 -> ~970x970); squeezed to the detector's 48px
+    // rows the date gets too small to find. Give it the centre at the frame's own size (the
+    // rotation keeps the frame centred) and shift the box back.
+    let d, ox = 0, oy = 0;
+    if ((w !== w0 || h !== h0) && o.detCentre !== false) {
+      const cw = Math.min(w, w0), ch = Math.min(h, h0);
+      ox = Math.floor((w - cw) / 2); oy = Math.floor((h - ch) / 2);
+      d = detectDate(o.det, crop(g, w, oy, oy + ch, ox, ox + cw), cw, ch);
+      if (d.box) d.box = [d.box[0] + ox, d.box[1] + oy, d.box[2] + ox, d.box[3] + oy];
+    } else d = detectDate(o.det, g, w, h);
     if (d.box) {
       const [bx0, by0, bx1, by1] = d.box, bh = by1 - by0;
       const y0 = Math.max(0, Math.floor(by0 - DET_PAD[0] * bh)), y1 = Math.min(h, Math.ceil(by1 + DET_PAD[0] * bh));
+      const t0 = Math.max(0, Math.floor(by0 - DET_PAD2 * bh)), t1 = Math.min(h, Math.ceil(by1 + DET_PAD2 * bh));
+      // a confident date there gets a second look with a tighter band (readRegion's recheck frames
+      // taller, which on the detector's already roomy band pulls in neighbouring lines and throws
+      // right dates away). Both agree -> done; they count as `agree`, so no recheck follows.
+      const settle = (x0, x1) => {
+        const r = read(y0, y1, x0, x1);
+        r.det = d.score;
+        if (weak(r) || r.conf < (o.detConf ?? DET_FAST_CONF)) return false;
+        const r2 = t1 - t0 >= 4 && (t0 !== y0 || t1 !== y1) ? read(t0, t1, x0, x1) : null;
+        return !!r2?.date && r2.date.iso === r.date.iso;
+      };
       // the box tends to stop short of the first / last glyph ("2021.05.16" -> "2021.05.1", a
       // different date): widen it over the ink clusters it touches
       let ix0 = bx0, ix1 = bx1;
@@ -897,15 +918,14 @@ function readGray(model, g, w, h, angle, o) {
         if (b > bx0 && a < bx1) { ix0 = Math.min(ix0, a); ix1 = Math.max(ix1, b); }
       const x0 = Math.max(0, Math.floor(ix0 - DET_PAD[1] * bh)), x1 = Math.min(w, Math.ceil(ix1 + DET_PAD[2] * bh));
       if (y1 - y0 >= 4 && x1 - x0 >= 8) {
-        const r = read(y0, y1, x0, x1);
-        r.det = d.score;
-        // Second look with a tighter band (readRegion's recheck frames taller, which on the
-        // detector's already roomy band pulls in neighbouring lines and throws right dates away).
-        // Both agree -> done; they count as `agree`, so no recheck follows.
-        if (!weak(r) && r.conf >= (o.detConf ?? DET_FAST_CONF)) {
-          const t0 = Math.max(0, Math.floor(by0 - DET_PAD2 * bh)), t1 = Math.min(h, Math.ceil(by1 + DET_PAD2 * bh));
-          const r2 = t1 - t0 >= 4 && (t0 !== y0 || t1 !== y1) ? read(t0, t1, x0, x1) : null;
-          fast = !!r2?.date && r2.date.iso === r.date.iso;
+        fast = settle(x0, x1);
+        // still cut short ("年3月31日", "27/03/3": wide gaps between the glyphs stop the clusters
+        // above): once more over all the ink in that band, before the full rule-based search.
+        // Off by default (opts.detWiden): on ExpDate photos it settled 1-4% more frames but added
+        // wrong dates on far / tilted frames (other text at the date's height comes in)
+        if (!fast && o.detWiden) {
+          const [wx0, wx1] = inkCols(g, w, y0, y1);
+          if (wx0 < x0 - 0.3 * bh || wx1 > x1 + 0.3 * bh) fast = settle(Math.min(wx0, x0), Math.max(wx1, x1));
         }
       }
     }
@@ -984,6 +1004,7 @@ function readGray(model, g, w, h, angle, o) {
     }
   }
   best.lines = lines;
+  best.detFast = fast; // the detector's box alone settled it (no rule-based search)
   best.skew = skew;
   best.turn = 0;
   // second look at the chosen line with slightly different vertical framing (for readRegion)

@@ -57,6 +57,9 @@ const r = readRegion(model, { data: rgbaBytes, width, height }); // ImageData-li
 | `recheck` | `true` | strict mode: read the chosen line a second time with slightly different framing, reject if the date differs (skipped when another candidate framing already gave the same date — `agree: false` turns that off) |
 | `strips` | `true` | wide box with no solid date yet: also look for lines strip by strip (each ~2 box heights wide), so text beside the date at other heights no longer merges it into one tall line |
 | `focus` | `true` | when the line also holds text beside the date (box framed loosely), re-read just the date characters, located from where the model emitted them; kept only if it confirms the wider read |
+| `det` | — | date-line detector (`await loadModel("kigen-det.bin")`, 43 KB): read the box it points at first; a confident date there, confirmed by a tighter second read, skips the rule-based search. Faster on loosely framed boxes, slower on tight crops |
+| `detConf` | `0.9` | with `det`: confidence the box's read needs to skip the rule-based search |
+| `detWiden` | `false` | with `det`: when that read is not confident, read the band once more over all its ink before the rule-based search (settles a few more frames; more wrong dates on far / tilted frames in ExpDate) |
 
 Result:
 
@@ -70,6 +73,7 @@ Result:
 | `skew`, `turn` | degrees the text was straightened by, and the extra 90/180/270° turn if one was needed |
 | `lines`, `band`, `cols` | detected text lines and the area that was read (in the straightened image) |
 | `candidates` | every area that was read, with its text and confidence |
+| `detFast` | with `det`: the detector's box alone settled the result |
 | `input` | the 32 px model input that was read (`{x, w}`), useful for debugging |
 
 ### `parseDate(text, opts?) → date | null`

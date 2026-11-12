@@ -102,6 +102,26 @@ if (process.env.NEWWRONG) {
   }
   process.exit(0);
 }
+// DETCMP=1 (with DET=path): the detector fixes one by one; "fast" = settled by the detector's box
+// alone (no rule-based search), with how many of those were right
+if (process.env.DETCMP) {
+  for (const [name, frames] of Object.entries(sets)) {
+    if (!frames.length) continue;
+    const line = [];
+    for (const [label, opts] of [["det as was", { det, detCentre: false, detWiden: false }], ["+centre", { det, detWiden: false }], ["+centre+widen", { det, detWiden: true }]]) {
+      let right = 0, wrong = 0, fast = 0, fastRight = 0, t = performance.now();
+      for (const f of frames) {
+        const r = K.readRegion(model, f.img, opts), ok = r.date?.iso === f.gt;
+        if (r.date) ok ? right++ : wrong++;
+        if (r.detFast) { fast++; if (ok) fastRight++; }
+      }
+      const n = frames.length;
+      line.push(`${label} ${pct2(right / n)}/${((wrong / n) * 100).toFixed(1).padStart(4)}% fast ${pct2(fast / n)} (right ${fastRight}/${fast}) ${((performance.now() - t) / n).toFixed(0)}ms`);
+    }
+    console.log(`${name.padEnd(14)} ${line.join("  |  ")}`);
+  }
+  process.exit(0);
+}
 if (process.env.CMP) {
   for (const [name, frames] of Object.entries(sets)) {
     if (!frames.length) continue;
