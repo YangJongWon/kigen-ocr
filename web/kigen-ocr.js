@@ -319,6 +319,102 @@ export function toInput(g, w, h, model) {
   return { x, w: W4 };
 }
 
+// ------------------------------------------------------------------ date-line detector
+// Optional second model (web/kigen-det.bin, detect.py): a gray frame -> the box of the expiry-date
+// line, so only that line goes to the recognizer. Load it with loadModel and pass it to
+// readRegion as opts.det. Without it everything works as before.
+// box padding in box heights: top/bottom, left, right (a character is emitted before its right
+// edge, and a cut last digit parses as another date)
+const DET_PAD = [0.25, 0.5, 0.8];
+const DET_PAD2 = 0.08; // top/bottom of the confirming second read
+// a read of the detected box at least this confident skips the rule-based line search
+const DET_FAST_CONF = 0.9;
+const DET_THR = 0.5;
+
+function detConv(a, C, H, W, L) {
+  const [O, , kh, kw] = L.shape, [ph, pw] = L.pad, dil = L.dil ?? 1;
+  const Ho = H + 2 * ph - kh + 1, Wo = W + 2 * pw - dil * (kw - 1), P = Ho * Wo, P4 = Math.ceil(P / 4) * 4;
+  if (WA?.int8) return [wasmConv8(L, a, C, H, W, kh, kw, ph, pw, dil, Ho, Wo, L.relu), O, Ho, Wo];
+  const K = C * kh * kw, col = colBuffer(K, P4, O);
+  for (let c = 0; c < C; c++)
+    for (let i = 0; i < kh; i++)
+      for (let j = 0; j < kw; j++) {
+        const row = ((c * kh + i) * kw + j) * P4, off = j * dil - pw;
+        const x0 = Math.max(0, -off), x1 = Math.min(Wo, W - off);
+        for (let y = 0; y < Ho; y++) {
+          const sy = y + i - ph;
+          if (sy < 0 || sy >= H) continue;
+          const so = (c * H + sy) * W + off, ro = row + y * Wo;
+          for (let x = x0; x < x1; x++) col[ro + x] = a[so + x];
+        }
+      }
+  return [runGemm(L, O, K, col, P, P4, L.relu), O, Ho, Wo];
+}
+
+// det model, input x (det.h rows x w) -> cell logits (det.h/4 x w/4)
+export function detectLogits(det, x, w) {
+  const prev = WA;
+  WA = det.wa ?? null;
+  try {
+    let a = x, C = 1, H = det.h, W = w;
+    for (const l of det.layers) {
+      if (l.op === "maxpool") [a, C, H, W] = maxpool(a, C, H, W, 2, 2);
+      else [a, C, H, W] = detConv(a, C, H, W, l);
+    }
+    return { z: a, Hc: H, Wc: W };
+  } finally {
+    WA = prev;
+  }
+}
+
+// cell probabilities p (Hc x Wc) -> {box: [x0, y0, x1, y1] in input pixels | null, score};
+// mirrors box_from_map in detect.py
+function boxFromMap(p, Hc, Wc, thr = DET_THR) {
+  let m = 0;
+  for (let k = 1; k < p.length; k++) if (p[k] > p[m]) m = k;
+  const score = p[m];
+  if (!(score >= thr)) return { box: null, score };
+  const seen = new Uint8Array(p.length), st = [m];
+  seen[m] = 1;
+  let r0 = Hc, r1 = -1, c0 = Wc, c1 = -1;
+  while (st.length) {
+    const k = st.pop(), a = (k / Wc) | 0, b = k % Wc;
+    r0 = Math.min(r0, a); r1 = Math.max(r1, a); c0 = Math.min(c0, b); c1 = Math.max(c1, b);
+    for (const [da, db] of [[1, 0], [-1, 0], [0, 1], [0, -1], [0, 2], [0, -2]]) {
+      const u = a + da, v = b + db, q = u * Wc + v;
+      if (u >= 0 && u < Hc && v >= 0 && v < Wc && !seen[q] && p[q] > thr / 2) { seen[q] = 1; st.push(q); }
+    }
+  }
+  let hs = 0, ws = 0, cy = 0, cx = 0;
+  for (let a = r0; a <= r1; a++) {
+    let v = 0;
+    for (let b = c0; b <= c1; b++) v = Math.max(v, p[a * Wc + b]);
+    hs += v; cy += (a + 0.5) * v;
+  }
+  for (let b = c0; b <= c1; b++) {
+    let v = 0;
+    for (let a = r0; a <= r1; a++) v = Math.max(v, p[a * Wc + b]);
+    ws += v; cx += (b + 0.5) * v;
+  }
+  cy = 4 * cy / hs; cx = 4 * cx / ws;
+  const bh = 4 * hs, bw = 4 * ws;
+  return { box: [cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2], score };
+}
+
+// gray frame (w x h, 0..255) -> {box: [x0, y0, x1, y1] in frame pixels | null, score}
+export function detectDate(det, g, w, h) {
+  const inp = toInput(g, w, h, det), nw = Math.min(det.maxw, Math.max(8, Math.round(w * det.h / h)));
+  const { z, Hc, Wc } = detectLogits(det, inp.x, inp.w);
+  const wv = Math.floor(nw / 4), p = new Float32Array(Hc * wv); // only cells over the real frame
+  for (let a = 0; a < Hc; a++) for (let b = 0; b < wv; b++) p[a * wv + b] = 1 / (1 + Math.exp(-z[a * Wc + b]));
+  const r = boxFromMap(p, Hc, wv);
+  if (r.box) {
+    const sx = w / nw, sy = h / det.h;
+    r.box = [r.box[0] * sx, r.box[1] * sy, r.box[2] * sx, r.box[3] * sy];
+  }
+  return r;
+}
+
 // Find the text band inside a user-framed box (rows with many vertical edges).
 function textBand(g, w, h) {
   const e = new Float32Array(h);
@@ -400,12 +496,74 @@ function textLines(g, w, h) {
   const mass = out.map(([a, b]) => { let s = 0; for (let y = a; y < b; y++) s += e[y]; return s; });
   const maxH = Math.max(0, ...out.map(([a, b]) => b - a)), maxM = Math.max(0, ...mass);
   runs = out.filter(([a, b], i) => b - a >= Math.max(4, 0.3 * maxH) && mass[i] >= 0.15 * maxM);
-  // pad each line, but never into its neighbour
-  return runs.slice(0, 4).map(([a, b], i) => {
+  // keep `all` (unpadded, every line) for bigLines; the first 4 are padded as before
+  const all = runs;
+  runs = runs.slice(0, 4);
+  const lines = padLines(runs, h);
+  lines.raw = all;
+  return lines;
+}
+
+// pad each line, but never into its neighbour
+function padLines(runs, h) {
+  return runs.map(([a, b], i) => {
     const m = Math.round((b - a) * 0.25);
     const lo = i ? Math.ceil((runs[i - 1][1] + a) / 2) : 0, hi = i + 1 < runs.length ? Math.floor((b + runs[i + 1][0]) / 2) : h;
     return [Math.max(lo, a - m), Math.min(hi, b + m)];
   });
+}
+
+// Big print textLines missed (up to 2 padded bands). Row edge energy falls with glyph size (a big
+// bold digit has few, far-apart edges per row), so dense small print sets the peak and a big date
+// line stays under textLines' threshold. Mask the lines it found (runs, unpadded) and look again
+// in what is left with a threshold from its own peak; only a band clearly taller than the smallest
+// line found counts (big print), not leftovers of small lines. A short date across a wide box is
+// barely above sensor noise in the plain edge sum, so this profile only counts strong edges
+// (above ~3x the median step) and is smoothed at line scale.
+function bigLines(g, w, h, runs) {
+  if (!runs?.length) return [];
+  const hist = new Uint32Array(256);
+  for (let y = 0; y < h; y += 2) for (let x = 1; x < w; x += 2) hist[Math.min(255, Math.abs(g[y * w + x] - g[y * w + x - 1]) | 0)]++;
+  let half = 0, cnt = 0, med = 0;
+  for (const v of hist) half += v;
+  half /= 2;
+  while (med < 255 && (cnt += hist[med]) < half) med++;
+  const t = Math.max(8, 3 * med), es = new Float32Array(h);
+  for (let y = 0; y < h; y++) {
+    let s = 0;
+    for (let x = 1; x < w; x++) { const d = Math.abs(g[y * w + x] - g[y * w + x - 1]); if (d > t) s += d; }
+    es[y] = s;
+  }
+  const tall = Math.min(...runs.map(([a, b]) => b - a)), big = [];
+  let all = runs;
+  for (let pass = 0; pass < 2 && big.length < 2; pass++) {
+    const free = new Uint8Array(h).fill(1);
+    for (const [a, b] of all) for (let y = Math.max(0, a - 1); y < Math.min(h, b + 1); y++) free[y] = 0;
+    const k = Math.max(1, Math.round(tall * 0.2)), ps = new Float32Array(h);
+    for (let y = 0; y < h; y++) {
+      if (!free[y]) continue;
+      let s = 0, n = 0;
+      for (let d = -k; d <= k; d++) if (y + d >= 0 && y + d < h && free[y + d]) { s += es[y + d]; n++; }
+      ps[y] = s / n;
+    }
+    let p2 = 0;
+    for (let y = 0; y < h; y++) if (ps[y] > p2) p2 = ps[y];
+    if (p2 <= 0) break;
+    const th2 = p2 * 0.3, add = [];
+    for (let y = 0; y < h; y++) {
+      if (ps[y] <= th2) continue;
+      let y1 = y;
+      while (y1 + 1 < h && ps[y1 + 1] > th2) y1++;
+      if (y1 + 1 - y >= 1.4 * tall) add.push([y, y1 + 1]);
+      y = y1;
+    }
+    if (!add.length) break;
+    big.push(...add);
+    all = [...all, ...add].sort((p, q) => p[0] - q[0]);
+  }
+  // padded against every neighbour (small lines too); the tallest two
+  const padded = padLines(all, h), keep = new Set(big.sort((p, q) => (q[1] - q[0]) - (p[1] - p[0])).slice(0, 2));
+  return padded.filter((_, i) => keep.has(all[i]));
 }
 
 // Lines found in vertical strips of a wide box. Over the full width, text blocks at other heights
@@ -423,14 +581,20 @@ function stripLines(g, w, h, max = 3) {
     const sub = crop(g, w, 0, h, x0, x1), n = x1 - x0;
     let e = 0;
     for (let y = 0; y < h; y++) for (let x = 1; x < n; x++) e += Math.abs(sub[y * n + x] - sub[y * n + x - 1]);
-    strips.push({ sub, n, e: e / n });
+    strips.push({ sub, n, e: e / n, x0, x1 });
     if (x1 === w) break;
   }
-  const emax = Math.max(0, ...strips.map((s) => s.e)), found = [];
+  const emax = Math.max(0, ...strips.map((s) => s.e)), found = [], singles = [];
   for (const s of strips) {
-    if (s.e < 0.35 * emax) continue;
+    // (a strip holding just a big bold date has far less edge energy than one of dense small
+    // print: kept down to 0.1 x, but only as a single-line strip)
+    if (s.e < 0.1 * emax) continue;
     const ls = textLines(s.sub, s.n, h);
-    if (ls.length < 2) continue; // one line: the full-width split already has it
+    // one line: usually the full-width split already has it. Beside a block of small print (a
+    // big date with ingredients next to it) it does not: kept apart with the strip's columns.
+    if (ls.length === 1 && !singles.some((f) => Math.abs(f.a - ls[0][0]) + Math.abs(f.b - ls[0][1]) < 0.15 * (ls[0][1] - ls[0][0])))
+      singles.push({ a: ls[0][0], b: ls[0][1], x0: s.x0, x1: s.x1, e: s.e });
+    if (ls.length < 2 || s.e < 0.35 * emax) continue;
     for (const [a, b] of ls) {
       let m = 0;
       for (let y = a; y < b; y++) for (let x = 1; x < s.n; x++) m += Math.abs(s.sub[y * s.n + x] - s.sub[y * s.n + x - 1]);
@@ -438,7 +602,18 @@ function stripLines(g, w, h, max = 3) {
       if (dup) dup.m = Math.max(dup.m, m); else found.push({ a, b, m });
     }
   }
-  return found.sort((p, q) => q.m - p.m).slice(0, max).map(({ a, b }) => [a, b]);
+  const out = found.sort((p, q) => q.m - p.m).slice(0, max).map(({ a, b }) => [a, b]);
+  out.singles = singles.sort((p, q) => q.e - p.e).slice(0, 2);
+  return out;
+}
+
+// Columns to read a band found in strip [sx0, sx1) with: the ink clusters along the band that
+// reach into the strip, padded — not the band's full-width ink, which takes in the text beside it.
+function stripCols(g, w, y0, y1, sx0, sx1) {
+  const cl = inkClusters(g, w, y0, y1, 0, w).filter(([a, b]) => b > sx0 && a < sx1);
+  if (!cl.length) return [sx0, sx1];
+  const pad = Math.round((y1 - y0) * 0.3);
+  return [Math.max(0, cl[0][0] - pad), Math.min(w, cl[cl.length - 1][1] + pad)];
 }
 
 // Stretch [a, b) of text (as characters) the date is read from, or null: the most precise
@@ -596,7 +771,8 @@ const weak = (r) => !r.date || r.date.order === "MD" || r.conf < 0.6;
 // ("22027/03/31"), yearless "2/8", 2-digit-year "03/31" — and results below opts.minConf.
 // A dropped date is kept in `rejected` ({date, reason}) so the UI can ask for a retake.
 export function readRegion(model, img, opts = {}) {
-  const o = { strict: opts.strict ?? true, minConf: opts.minConf ?? MIN_CONF, focus: opts.focus, strips: opts.strips };
+  const o = { strict: opts.strict ?? true, minConf: opts.minConf ?? MIN_CONF, focus: opts.focus, strips: opts.strips,
+    det: opts.det, detConf: opts.detConf };
   const best = readTurns(model, img, o);
   best.dateConf = best.date ? dateConf(best.text, best.probs, best.date.iso, o.strict) : null;
   // only a manufacturing date was found: never hand it out as the expiry
@@ -706,14 +882,57 @@ function readGray(model, g, w, h, angle, o) {
     if (!best || r.score > best.score) best = { ...r };
     return r;
   };
+  // Detector (o.det, web/kigen-det.bin): read just the box it points at. A confident date there
+  // skips the rule-based search below (every candidate line, strips, trims, focus).
+  let fast = false;
+  if (o.det) {
+    const d = detectDate(o.det, g, w, h);
+    if (d.box) {
+      const [bx0, by0, bx1, by1] = d.box, bh = by1 - by0;
+      const y0 = Math.max(0, Math.floor(by0 - DET_PAD[0] * bh)), y1 = Math.min(h, Math.ceil(by1 + DET_PAD[0] * bh));
+      // the box tends to stop short of the first / last glyph ("2021.05.16" -> "2021.05.1", a
+      // different date): widen it over the ink clusters it touches
+      let ix0 = bx0, ix1 = bx1;
+      for (const [a, b] of inkClusters(g, w, Math.max(0, Math.floor(by0)), Math.min(h, Math.ceil(by1)), 0, w))
+        if (b > bx0 && a < bx1) { ix0 = Math.min(ix0, a); ix1 = Math.max(ix1, b); }
+      const x0 = Math.max(0, Math.floor(ix0 - DET_PAD[1] * bh)), x1 = Math.min(w, Math.ceil(ix1 + DET_PAD[2] * bh));
+      if (y1 - y0 >= 4 && x1 - x0 >= 8) {
+        const r = read(y0, y1, x0, x1);
+        r.det = d.score;
+        // Second look with a tighter band (readRegion's recheck frames taller, which on the
+        // detector's already roomy band pulls in neighbouring lines and throws right dates away).
+        // Both agree -> done; they count as `agree`, so no recheck follows.
+        if (!weak(r) && r.conf >= (o.detConf ?? DET_FAST_CONF)) {
+          const t0 = Math.max(0, Math.floor(by0 - DET_PAD2 * bh)), t1 = Math.min(h, Math.ceil(by1 + DET_PAD2 * bh));
+          const r2 = t1 - t0 >= 4 && (t0 !== y0 || t1 !== y1) ? read(t0, t1, x0, x1) : null;
+          fast = !!r2?.date && r2.date.iso === r.date.iso;
+        }
+      }
+    }
+  }
   // (stopping at the first confident date was tried: 10-18% faster, but more wrong dates and
   // fewer 賞味/消費 labels on two-line boxes, so every candidate is read)
-  for (const [y0, y1] of cands) read(y0, y1, ...inkCols(g, w, y0, y1));
+  if (!fast) for (const [y0, y1] of cands) read(y0, y1, ...inkCols(g, w, y0, y1));
+  // no solid date: big print hidden by dense small print (only then — cheap, but every extra band
+  // read on frames that already read well costs time and adds wrong dates)
+  const near = (l) => cands.some(([a, b]) => Math.abs(a - l[0]) + Math.abs(b - l[1]) < 0.15 * (l[1] - l[0]));
+  // (weak() alone is too lenient here: a squashed whole-box read of the big date often gives a
+  // misread date at conf 0.6-0.9, which the recheck then throws away)
+  const fromLine = lines.some(([a, b]) => a === best.band[0] && b === best.band[1]);
+  if (!fast && (weak(best) || best.conf < 0.9 || !fromLine))
+    for (const l of bigLines(g, w, h, lines.raw))
+      if (!near(l)) { cands.push(l); lines.push(l); read(l[0], l[1], ...inkCols(g, w, l[0], l[1])); }
   // no solid date: look for lines strip by strip (box framed loosely, other text beside the date).
   // Only then — on boxes that already read well they cost ~25ms and add wrong dates.
-  if (weak(best) && o.strips !== false)
-    for (const l of stripLines(g, w, h))
-      if (!cands.some(([a, b]) => Math.abs(a - l[0]) + Math.abs(b - l[1]) < 0.15 * (l[1] - l[0]))) { cands.push(l); read(l[0], l[1], ...inkCols(g, w, l[0], l[1])); }
+  if (!fast && weak(best) && o.strips !== false) {
+    const sl = stripLines(g, w, h);
+    for (const l of sl)
+      if (!near(l)) { cands.push(l); read(l[0], l[1], ...inkCols(g, w, l[0], l[1])); }
+    if (weak(best))
+      // (only a band not read yet: re-reading a known band with strip columns mostly cuts the
+      // date short, "2021.11.17" -> "2021.1", a month date that then wins)
+      for (const { a, b, x0, x1 } of sl.singles ?? []) if (!near([a, b])) read(a, b, ...stripCols(g, w, a, b, x0, x1));
+  }
   // Junk at a line's ends (label border, cut neighbour glyphs, lot code) turns "2022.09.10"
   // into "22022.09.10" / "2021.11.17I". If no solid date came out, re-read the most confident
   // lines without their outermost ink cluster. Cutting a real part ("25 09 2021" -> "25 09")
@@ -732,7 +951,7 @@ function readGray(model, g, w, h, angle, o) {
   // Focus: with the phone held far away the line also holds other text beside the date, which
   // gets glued to it ("22021.10.06 BL04"). Find the characters a date parses from, map them back
   // to x through where the model emitted them, and re-read just that stretch.
-  if (o.focus !== false)
+  if (!fast && o.focus !== false)
     for (const r of [...reads].filter((r) => r.pos && /\d{2}/.test(r.text)).sort((p, q) => q.score - p.score).slice(0, 2)) {
       const sp = dateSpan(r.text, o.strict);
       if (!sp) continue;

@@ -14,6 +14,9 @@ import * as K from "./web/kigen-ocr.js";
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const buf = readFileSync(join(ROOT, "web/kigen.bin"));
 const model = await K.loadModel(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+// DET=path: also run with the date-line detector (opts.det)
+let det = null;
+if (process.env.DET) { const d = readFileSync(join(ROOT, process.env.DET)); det = await K.loadModel(d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength)); }
 const base = join(ROOT, "datasets/Products-Real/evaluation");
 const ann = JSON.parse(readFileSync(join(base, "annotations.json"), "utf8"));
 
@@ -103,7 +106,7 @@ if (process.env.CMP) {
   for (const [name, frames] of Object.entries(sets)) {
     if (!frames.length) continue;
     const line = [];
-    for (const [label, opts] of [["strips off", { strips: false }], ["strips", {}]]) {
+    for (const [label, opts] of [["strips off", { strips: false }], ["strips", {}], ...(det ? [["det", { det }]] : [])]) {
       let right = 0, wrong = 0, t = performance.now();
       for (const f of frames) { const r = K.readRegion(model, f.img, opts); if (r.date) r.date.iso === f.gt ? right++ : wrong++; }
       const n = frames.length;
