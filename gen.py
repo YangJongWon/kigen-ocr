@@ -16,7 +16,10 @@ CHARS = (" 0123456789〇一二三四五六七八九十年月日上中下旬初�
          "賞味期限消費時分午前後ABCDEFGHIJKLMNOPQRSTUVWXYZ./-:()"
          # appended for Korean / Chinese labels (indices of the characters above stay the same)
          "유통기한소비품질지제조일자년월까생산"
-         "保质質有效至生产產製造到存民國国")
+         "保质質有效至生产產製造到存民國国"
+         # lot-code symbols after the date ("2028年02月+AJ"); without them "+" was read as 中 / 初,
+         # which parses as a dekad (中旬) and moves the expiry 9-19 days early
+         "+*#")
 VOCAB = ["<b>"] + list(CHARS)
 C2I = {c: i for i, c in enumerate(VOCAB)}
 import os
@@ -193,8 +196,8 @@ def rand_text():
         s = f"{yy}{sep}{pad(m, p)}{sep}{pad(d, p)}"
     elif k == 2:  # 2026.03 / 26.3
         s = f"{random.choice([str(y), yy])}{sep or '.'}{pad(m, p)}"
-    elif k == 3:  # 2025年12月31日
-        s = f"{random.choice([str(y), yy])}年{pad(m, p)}月{pad(d, p)}日"
+    elif k == 3:  # 2025年12月31日 / 2028年02月 (beverages: year-month, often with a lot code after)
+        s = f"{random.choice([str(y), yy])}年{pad(m, p)}月" + ("" if random.random() < 0.3 else f"{pad(d, p)}日")
     elif k == 4:  # 2026年3月 (上旬) / 2026.03末 / 26年3月初旬 / R8.3 下旬
         PART = ["上旬", "中旬", "下旬", "初旬", "初", "中", "末"]
         r4 = random.random()
@@ -280,8 +283,9 @@ def rand_text():
     else:
         pre = ""
     suf = ""
-    if random.random() < 0.25:
-        suf = random.choice([" ", " ", " ", "/", " /"]) + rand_code()
+    # year-month lines on bottle necks / caps usually carry a lot code right after 月 ("2028年02月+AJ")
+    if random.random() < (0.5 if s.endswith("月") else 0.25):
+        suf = random.choice([" ", " ", " ", "/", " /", "+", "+", " +", "*", "#"]) + rand_code()
     t = " ".join((pre + s + suf).split())
     if len(t) > 24:
         t = s
@@ -384,6 +388,8 @@ DOT5X7 = {k: v.split() for k, v in {
     ".": "00 00 00 00 00 11 11", ":": "00 11 11 00 11 11 00", "-": "0000 0000 0000 1111 0000 0000 0000",
     "/": "00001 00001 00010 00100 01000 10000 10000", "(": "001 010 100 100 100 010 001",
     ")": "100 010 001 001 001 010 100",
+    "+": "00000 00100 00100 11111 00100 00100 00000", "*": "00000 10101 01110 11111 01110 10101 00000",
+    "#": "01010 01010 11111 01010 11111 01010 01010",
 }.items()}
 # variants seen on real coders: zero without the slash dot, 1 without foot, open-top 4
 DOT5X7_ALT = {"0": ["01110 10001 10001 10001 10001 10001 01110"], "1": ["00100 01100 00100 00100 00100 00100 00100"],

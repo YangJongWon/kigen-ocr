@@ -910,7 +910,9 @@ export function parseDate(text, opts = {}) {
   let part = null;
   // 上旬/初旬/初/月初 = 1-10, 中旬/中 = 11-20, 下旬/末/月末 = 21-end
   if (!r.d) {
-    const pm = s.replace(/[A-Z]+/g, "").match(/上旬|初旬|月初|初|中旬|中|下旬|月末|末/);
+    // a bare 初 / 中 / 末 counts only at the end or before a space / 旬 / 日: glued to more junk it is
+    // usually a misread lot-code symbol ("2028年02月+AJ" read as "2028年02月中지" / "中0")
+    const pm = s.match(/上旬|初旬|月初|中旬|下旬|月末|(?:初|中|末)(?=$|\s|[旬日])/);
     if (pm) part = /上|初/.test(pm[0]) ? "上" : /中/.test(pm[0]) ? "中" : "下";
   }
   const precision = r.d ? "day" : part ? "dekad" : "month";
