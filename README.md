@@ -74,6 +74,7 @@ Result:
 | `lines`, `band`, `cols` | detected text lines and the area that was read (in the straightened image) |
 | `candidates` | every area that was read, with its text and confidence |
 | `detFast` | with `det`: the detector's box alone settled the result |
+| `detBox` | with `det`: `{ box, score }`, the detector's box (in the straightened image) and its score |
 | `input` | the 32 px model input that was read (`{x, w}`), useful for debugging |
 
 ### `parseDate(text, opts?) → date | null`
@@ -133,6 +134,14 @@ uv run python run_train.py --steps 40000          # from scratch
 uv run python run_train.py --init model.pt --lr 5e-4 --steps 6000 --out model_ft.pt
 uv run python export.py --ckpt model.pt           # -> web/kigen.bin, web/fixture.json
 node web/test-parse.mjs && node web/test-model.mjs
+```
+
+The date-line detector (`kigen-det.bin`) is trained on synthetic frames (`detgen.py`) and fine-tuned with real photos from two MIT-licensed Roboflow sets (`realdet.py`: [expiry-date-detection](https://universe.roboflow.com/abhilashasacademicworkspace-8igt2/expiry-date-detection-ssxnm), [expiry-date-2](https://universe.roboflow.com/muhammedalibakaka/expiry-date-2); not distributed). Their boxes are drawn with a margin, so only each box's core is taught as the date. Dates of unknown kind are left out of the loss: these labels do not tell expiry from manufacturing dates. ExpDate copies inside the first set (`img_*`, `test_*`) are excluded.
+
+```
+uv run python run_det.py train --steps 30000 --out det.pt                       # synthetic
+uv run python run_det.py train --init det.pt --real 0.4 --lr 1e-3 --steps 16000 --out det_real.pt
+uv run python run_det.py export --ckpt det_real.pt                              # -> web/kigen-det.bin
 ```
 
 After editing `web/gemm.wat`, rebuild the embedded kernel with `npm install && node tools/build-wasm.mjs` (needs the `wabt` dev dependency).

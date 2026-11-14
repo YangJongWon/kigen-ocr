@@ -63,15 +63,28 @@ def collate(batch):
     for x, b in batch:
         w = x.shape[1]
         xs.append(np.pad(x, ((0, 0), (0, W - w)), mode="edge"))
-        ts.append(target(b, W))
         m = np.zeros((detgen.DET_H // 4, W // 4), np.float32)
         m[:, : w // 4] = 1
+        if b is not None and b[4:] == ("ignore",):
+            m[target(b[:4], W) > 0] = 0  # a date of unknown kind: neither date nor background
+            ts.append(np.zeros_like(m))
+        elif b is not None and len(b) == 5:
+            # loose box (real-photo label, drawn with margin): only its core is taught as date, the
+            # margin is ignored, so how tightly a box hugs the glyphs is learnt from the synthetic data
+            x0, y0, x1, y1 = b[:4]
+            dy = 0.25 * (y1 - y0)
+            inner = (x0 + dy, y0 + dy, x1 - dy, y1 - dy)
+            t, outer = target(inner, W), target(b[:4], W)
+            m[(outer > 0) & (t < 1)] = 0
+            ts.append(t)
+        else:
+            ts.append(target(b, W))
         ms.append(m)
     return (torch.from_numpy(np.stack(xs))[:, None], torch.from_numpy(np.stack(ts)),
             torch.from_numpy(np.stack(ms)), [b for _, b in batch])
 
 
-def batches(bs, workers):
+def batches(bs, workers, real=0.0):
     import collections
     import multiprocessing as mp
     pool = mp.get_context("spawn").Pool(workers)
@@ -80,7 +93,11 @@ def batches(bs, workers):
     while True:
         while len(q) < workers * 2:
             seed += 1
-            q.append(pool.apply_async(detgen.make_batch, ((seed, bs),)))
+            if real > 0:  # mix in real-photo frames (realdet.py)
+                import realdet
+                q.append(pool.apply_async(realdet.make_batch, ((seed, bs, real),)))
+            else:
+                q.append(pool.apply_async(detgen.make_batch, ((seed, bs),)))
         yield collate(q.popleft().get())
 
 
@@ -128,12 +145,15 @@ def evaluate(model, val, dev):
     """hit: box with IoU >= 0.5 (date frames); fp: a box on a no-date frame; also the share of date
     frames whose box covers the date's full height (what the recognizer needs)."""
     model.eval()
-    hit = cover = n = fp = neg = 0
+    hit = cover = n = fp = neg = found = 0
     with torch.no_grad():
         for k in range(0, len(val), 64):
             x, _, _, boxes = collate(val[k:k + 64])
             p = torch.sigmoid(model(x.to(dev))).cpu().numpy()
             for pi, (xi, b) in zip(p, val[k:k + 64]):
+                if b is not None and b[4:] == ("ignore",):
+                    continue  # unknown kind: not scored
+                b = None if b is None else b[:4]
                 pb, _ = box_from_map(pi[:, : xi.shape[1] // 4])
                 if b is None:
                     neg += 1
@@ -142,10 +162,12 @@ def evaluate(model, val, dev):
                 n += 1
                 if pb is not None:
                     hit += iou(pb, b) >= 0.5
+                    # for loose (real) labels: centre inside the label, not taller than it
+                    found += b[0] <= (pb[0] + pb[2]) / 2 <= b[2] and b[1] <= (pb[1] + pb[3]) / 2 <= b[3]                         and pb[3] - pb[1] <= 1.1 * (b[3] - b[1])
                     cover += pb[1] <= b[1] + 0.15 * (b[3] - b[1]) and pb[3] >= b[3] - 0.15 * (b[3] - b[1]) \
                         and pb[0] <= b[0] + 0.1 * (b[2] - b[0]) and pb[2] >= b[2] - 0.1 * (b[2] - b[0])
     model.train()
-    return hit / max(n, 1), cover / max(n, 1), fp / max(neg, 1)
+    return hit / max(n, 1), cover / max(n, 1), fp / max(neg, 1), found / max(n, 1)
 
 
 def train(args):
@@ -153,6 +175,10 @@ def train(args):
     random.seed(4242)
     np.random.seed(4242)
     val = [detgen.sample() for _ in range(1500)]
+    vreal = None
+    if args.real > 0:
+        import realdet
+        vreal = [realdet.sample("val") for _ in range(1500)]
     model = Det().to(dev)
     if args.init:
         model.load_state_dict(torch.load(args.init, map_location=dev))
@@ -160,7 +186,7 @@ def train(args):
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, args.lr, total_steps=args.steps, pct_start=0.05)
     best, t0, step = -1, time.time(), 0
-    for x, t, m, _ in batches(args.bs, args.workers):
+    for x, t, m, _ in batches(args.bs, args.workers, args.real):
         x, t, m = x.to(dev, non_blocking=True), t.to(dev), m.to(dev)
         z = model(x)
         bce = (F.binary_cross_entropy_with_logits(z, t, reduction="none") * m).sum() / m.sum()
@@ -178,10 +204,16 @@ def train(args):
         if step % 200 == 0:
             print(f"step {step} loss {loss.item():.3f} bce {bce.item():.3f} dice {dice.item():.3f} {time.time() - t0:.0f}s", flush=True)
         if step % 2000 == 0 or step == args.steps:
-            hit, cov, fp = evaluate(model, val, dev)
-            print(f"== step {step} hit {hit:.4f} cover {cov:.4f} fp-on-empty {fp:.3f}", flush=True)
-            if hit > best:
-                best = hit
+            hit, cov, fp, _ = evaluate(model, val, dev)
+            msg = f"== step {step} hit {hit:.4f} cover {cov:.4f} fp-on-empty {fp:.3f}"
+            score = hit
+            if vreal:
+                rh, rc, rf, rfd = evaluate(model, vreal, dev)
+                msg += f" | real hit {rh:.4f} found {rfd:.4f} fp {rf:.3f}"
+                score = (hit + rfd) / 2  # IoU with loose labels would favour loose boxes
+            print(msg, flush=True)
+            if score > best:
+                best = score
                 torch.save(model.state_dict(), args.out)
         if step >= args.steps:
             break
@@ -271,6 +303,7 @@ def main():
     ap.add_argument("--workers", type=int, default=20)
     ap.add_argument("--lr", type=float, default=3e-3)
     ap.add_argument("--init", default=None)
+    ap.add_argument("--real", type=float, default=0.0, help="share of real-photo frames (realdet.py)")
     ap.add_argument("--out", default="det.pt")
     ap.add_argument("--ckpt", default="det.pt")
     args = ap.parse_args()
@@ -285,7 +318,10 @@ def main():
         random.seed(4242)
         np.random.seed(4242)
         val = [detgen.sample() for _ in range(1500)]
-        print("hit / cover / fp-on-empty", evaluate(model, val, "cuda"))
+        print("hit / cover / fp-on-empty / found", evaluate(model, val, "cuda"))
+        import realdet
+        vreal = [realdet.sample("val") for _ in range(1500)]
+        print("real:", evaluate(model, vreal, "cuda"))
 
 
 if __name__ == "__main__":

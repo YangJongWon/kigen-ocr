@@ -122,6 +122,35 @@ if (process.env.DETCMP) {
   }
   process.exit(0);
 }
+// DET2=path (with DET=path): two detectors side by side — right/wrong, how many frames the
+// detector's box alone settled (and how many of those right); SHOW=1 lists frames DET got right
+// and DET2 did not, with what each detector's read said
+if (process.env.DET2) {
+  const d2b = readFileSync(join(ROOT, process.env.DET2));
+  const det2 = await K.loadModel(d2b.buffer.slice(d2b.byteOffset, d2b.byteOffset + d2b.byteLength));
+  for (const [name, frames] of Object.entries(sets)) {
+    if (!frames.length) continue;
+    const st = [det, det2].map(() => ({ right: 0, wrong: 0, fast: 0, fastRight: 0 })), lost = [];
+    for (const f of frames) {
+      const rs = [det, det2].map((d, i) => {
+        const r = K.readRegion(model, f.img, { det: d }), ok = r.date?.iso === f.gt, s = st[i];
+        if (r.date) ok ? s.right++ : s.wrong++;
+        if (r.detFast) { s.fast++; if (ok) s.fastRight++; }
+        return { r, ok };
+      });
+      if (rs[0].ok && !rs[1].ok) lost.push({ f, rs });
+    }
+    const n = frames.length;
+    console.log(`${name.padEnd(14)} ` + st.map((s, i) => `${i ? "DET2" : "DET "} ${pct2(s.right / n)}/${((s.wrong / n) * 100).toFixed(1).padStart(4)}% fast ${pct2(s.fast / n)} (right ${s.fastRight}/${s.fast})`).join("  |  ") + `  lost ${lost.length}`);
+    if (process.env.SHOW)
+      for (const { f, rs } of lost)
+        console.log(`   ${f.file} want ${f.gt}\n` + rs.map(({ r }, i) => {
+          const b = r.detBox;
+          return `     ${i ? "DET2" : "DET "} got ${r.date?.iso ?? "-"}${r.rejected ? ` (rejected ${r.rejected.reason})` : ""} fast ${!!r.detFast}  box ${b?.box ? b.box.map((v) => v.toFixed(0)).join(",") : "none"} score ${b?.score.toFixed(2)}  frame ${f.img.width}x${f.img.height}  "${r.text}"`;
+        }).join("\n"));
+  }
+  process.exit(0);
+}
 if (process.env.CMP) {
   for (const [name, frames] of Object.entries(sets)) {
     if (!frames.length) continue;

@@ -885,7 +885,7 @@ function readGray(model, g, w, h, angle, o) {
   };
   // Detector (o.det, web/kigen-det.bin): read just the box it points at. A confident date there
   // skips the rule-based search below (every candidate line, strips, trims, focus).
-  let fast = false;
+  let fast = false, detBox = null;
   if (o.det) {
     // Straightening grows the canvas (45°: 972x404 -> ~970x970); squeezed to the detector's 48px
     // rows the date gets too small to find. Give it the centre at the frame's own size (the
@@ -897,6 +897,7 @@ function readGray(model, g, w, h, angle, o) {
       d = detectDate(o.det, crop(g, w, oy, oy + ch, ox, ox + cw), cw, ch);
       if (d.box) d.box = [d.box[0] + ox, d.box[1] + oy, d.box[2] + ox, d.box[3] + oy];
     } else d = detectDate(o.det, g, w, h);
+    detBox = { box: d.box, score: d.score };
     if (d.box) {
       const [bx0, by0, bx1, by1] = d.box, bh = by1 - by0;
       const y0 = Math.max(0, Math.floor(by0 - DET_PAD[0] * bh)), y1 = Math.min(h, Math.ceil(by1 + DET_PAD[0] * bh));
@@ -1005,6 +1006,7 @@ function readGray(model, g, w, h, angle, o) {
   }
   best.lines = lines;
   best.detFast = fast; // the detector's box alone settled it (no rule-based search)
+  if (detBox) best.detBox = detBox; // the detector's box (straightened image) and score
   best.skew = skew;
   best.turn = 0;
   // second look at the chosen line with slightly different vertical framing (for readRegion)
