@@ -1113,6 +1113,8 @@ export function parseDate(text, opts = {}) {
     .replace(/(\d)\s*년/g, "$1年").replace(/(\d)\s*월/g, "$1月").replace(/(\d)\s*일/g, "$1日")
     .replace(/까지|迄|至/g, " ")
     .replace(/\s*([.\/\-:年月])\s*/g, "$1")          // "R8. 11. 16" -> "R8.11.16"
+    .replace(/(\d)\s+(?=[日旬])/g, "$1")             // "2026 年 04 月 23 日" (spaced print)
+    .replace(/(令和|平成|昭和|民國|民国)\s+(?=\d)/g, "$1") // "令和 8 年"
     .replace(/(^|[^A-Z])([RHS]) (?=\d)/g, "$1$2");   // "R 8.11.16"
   const label = labelOf(s);
   // day-first regions label in Latin script (EXP, BB, HSD, SEBELUM ...); judged before the
