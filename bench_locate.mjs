@@ -12,7 +12,7 @@ import jpeg from "jpeg-js";
 import * as K from "./web/kigen-ocr.js";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
-const buf = readFileSync(join(ROOT, "web/kigen.bin"));
+const buf = readFileSync(join(ROOT, process.env.MODEL || "web/kigen.bin")); // MODEL=: another recognizer
 const model = await K.loadModel(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
 // DET=path: also run with the date-line detector (opts.det)
 let det = null;

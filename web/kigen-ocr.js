@@ -1229,15 +1229,22 @@ function findCandidates(s, kind, today, hasTime, taiwan = false, foreign = false
   for (m of s.matchAll(/(?<![\dA-Z])(\d{1,4})[.\/\- ](\d{1,2})(?:[.\/\- ](\d{1,4}))?(?![\dA-Z])/g)) {
     const [a, b, c] = [m[1], m[2], m[3]];
     if (c) {
+      // An end glyph cut off by the frame edge and left out by the recognizer leaves a shorter
+      // date that still parses: "2021/12/15" -> "021/12/15" (= 21.12.2015), "2022.09.10" ->
+      // "2022.09.1", "11.09.2021" -> "1.09.2021". A 3-digit field is neither a year nor a day, and
+      // a 1-digit outer field (the cut end) beside a zero-padded inner one is not how a coder
+      // prints: both loose (dropped in strict mode). ("2026.9/06" is not a cut shape: kept.)
+      const three = a.length === 3 || c.length === 3;
+      const mixed = (outer, inner) => outer.length === 1 && inner.length === 2 && inner[0] === "0";
       if (a.length !== 4 && (c.length === 4 || c.length === 2)) {
         // "7/2/10" with a 2-digit year is usually 令7/2/10 with the era lost, not 7 Feb 2010
-        const lostEra = a.length === 1 && c.length === 2;
-        add(+c, +b, +a, "DMY", P.DMY + (c.length === 4 ? 0.5 : 0), lostEra);
-        add(+c, +a, +b, "MDY", P.MDY + (c.length === 4 ? 0.5 : 0), lostEra);
+        const lostEra = a.length === 1 && c.length === 2, cut = three || mixed(a, b);
+        add(+c, +b, +a, "DMY", P.DMY + (c.length === 4 ? 0.5 : 0), lostEra || cut);
+        add(+c, +a, +b, "MDY", P.MDY + (c.length === 4 ? 0.5 : 0), lostEra || cut);
         // Thai labels often print the Buddhist-era year with 2 digits: 31/03/69 = 2569 = 2026
-        if (c.length === 2 && +c >= 60 && +c <= 80) add(2500 + +c, +b, +a, "DMY", P.DMY, lostEra);
+        if (c.length === 2 && +c >= 60 && +c <= 80) add(2500 + +c, +b, +a, "DMY", P.DMY, lostEra || cut);
       }
-      if (c.length <= 2 && (a.length === 4 || a.length === 2)) add(+a, +b, +c, "YMD", P.YMD + (a.length === 4 ? 1 : 0));
+      if (c.length <= 2 && (a.length === 4 || a.length === 2)) add(+a, +b, +c, "YMD", P.YMD + (a.length === 4 ? 1 : 0), mixed(c, b));
     } else {
       // a two-part date touching a separator is a cut-off three-part one ("2022.01.", "/12/2021")
       // ("2026.9/CK", "2026.9/0K": a lot code after the separator is not a cut-off day)

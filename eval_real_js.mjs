@@ -6,7 +6,7 @@ import jpeg from "jpeg-js";
 import { loadModel, readRegion, toGray, toInput, recognize, parseDate } from "./web/kigen-ocr.js";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
-const model = await loadModel(readFileSync(join(ROOT, "web/kigen.bin")).buffer);
+const model = await loadModel(readFileSync(join(ROOT, process.env.MODEL || "web/kigen.bin")).buffer); // MODEL=: another recognizer
 
 function loadJpeg(path) {
   const raw = jpeg.decode(readFileSync(path), { useTArray: true, formatAsRGBA: true });
@@ -55,7 +55,7 @@ function scoreSuite(name, items, mode) {
     if (digits(text) === digits(it.gt) && digits(it.gt)) dig++;
     if (it.iso && gotIso === it.iso) iso++;
     if (digits(text) !== digits(it.gt) || (it.iso && gotIso !== it.iso)) {
-      if (misses.length < 15) misses.push({ file: it.file, gt: it.gt, iso: it.iso, text, gotIso, conf: r.conf });
+      if (misses.length < (process.env.ALLMISS ? 1e9 : 15)) misses.push({ file: it.file, gt: it.gt, iso: it.iso, text, gotIso, conf: r.conf });
     }
   }
   console.log(

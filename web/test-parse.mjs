@@ -205,6 +205,13 @@ const strictCases = [
   ["8.3.31", null],
   ["115.03.31", null],                    // bare 3-digit year without a Taiwanese label: broken year?
   ["有效日期 115.03.31", "2026-03-31"],
+  // an end glyph cut off by the frame edge and left out by the recognizer
+  ["021/12/15", null],                    // "2021/12/15": was 2015-12-21
+  ["021.07.25", null],                    // was 2025-07-21
+  ["2022.09.1", null],                    // "2022.09.10": was 2022-09-01
+  ["1.09.2021", null],                    // "11.09.2021"
+  ["2021.9.1", "2021-09-01"],             // unpadded print: kept
+  ["09.1.2021", "2021-01-09"],
   // still accepted
   ["AUG292020", "2020-08-29"],
   ["2026.03 末", "2026-03"],
