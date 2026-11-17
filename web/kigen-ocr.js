@@ -250,6 +250,18 @@ export function recognize(model, x, w) {
     const r = v * T;
     for (let t = 0; t < T; t++) if (a[r + t] > bestL[t]) { bestL[t] = a[r + t]; bestV[t] = v; }
   }
+  // 初 vs 末 (dekad start vs month end, 20 days apart): highest probability of each over the
+  // steps where either one wins
+  const iSho = vocab.indexOf("初"), iMatsu = vocab.indexOf("末");
+  let shomatsu = null;
+  for (let t = 0; t < T; t++) {
+    if (bestV[t] !== iSho && bestV[t] !== iMatsu) continue;
+    let sum = 0;
+    for (let v = 0; v < V; v++) sum += Math.exp(a[v * T + t] - bestL[t]);
+    const p1 = Math.exp(a[iSho * T + t] - bestL[t]) / sum, p2 = Math.exp(a[iMatsu * T + t] - bestL[t]) / sum;
+    shomatsu ??= { sho: 0, matsu: 0 };
+    shomatsu.sho = Math.max(shomatsu.sho, p1); shomatsu.matsu = Math.max(shomatsu.matsu, p2);
+  }
   for (let t = 0; t < T; t++) {
     const best = bestV[t], bv = bestL[t];
     if (best !== 0 && best !== prev) { // softmax only where a character is emitted
@@ -268,7 +280,7 @@ export function recognize(model, x, w) {
     if (/\s/.test(ch[i])) { if (!text || /\s/.test(ch[i + 1] ?? " ")) continue; }
     for (const c of ch[i]) { text += /\s/.test(c) ? " " : c; probs.push(pr[i]); pos.push(ps[i]); }
   }
-  return { text, conf: n ? confSum / n : 0, minConf: n ? minConf : 0, probs, pos };
+  return { text, conf: n ? confSum / n : 0, minConf: n ? minConf : 0, probs, pos, shomatsu };
 }
 
 // ------------------------------------------------------------------ preprocessing
@@ -811,6 +823,21 @@ export function readRegion(model, img, opts = {}) {
     best.rejected = { date: best.date, reason: "lowconf" };
     best.date = null;
   }
+  // 初 or 末 (the 1st-10th or the month's end) not clearly told apart: blurred small print fills
+  // the space inside 刀 that tells them apart, and taking 初 for 末 moves the expiry 20 days later
+  const sm = best.shomatsu;
+  if (o.strict && best.date?.precision === "dekad" && sm && /[初末]/.test(best.text)
+      && Math.abs(sm.sho - sm.matsu) < (opts.dekadMargin ?? DEKAD_MARGIN)) {
+    best.rejected = { date: best.date, reason: "dekad" };
+    best.date = null;
+  }
+  // a year-month ending at the frame's right edge: a cut-off dekad mark (初 / 上旬) would make it
+  // run 20 days too long. Only when the month comes last (a mark never follows "02.2023")
+  if (o.strict && best.date?.precision === "month" && best.date.order !== "MY" && best.edgeGap < (opts.edgeGap ?? EDGE_GAP)
+      && best.edgeInk >= (opts.edgeInk ?? EDGE_INK)) {
+    best.rejected = { date: best.date, reason: "edge" };
+    best.date = null;
+  }
   // a digit misread with high confidence ("10.08" -> "10.03") rarely survives a second look
   if (o.strict && best.date && (opts.recheck ?? RECHECK) && !((opts.agree ?? AGREE) && best.agree)) {
     // (a 2-of-3 tie-break with wider framing was tried: +2-9% right dates but up to 2x wrong ones,
@@ -819,7 +846,7 @@ export function readRegion(model, img, opts = {}) {
     // to the ends ("2021.03.18時", "22021.04.02", "XP2022.01.08"), which used to throw away right
     // reads (7:1 guide: 18 of 21 unstable rejections were right dates)
     const again = best.recheck();
-    if (!findDate([...again], best.date.iso, o.strict)) {
+    if (!findDate([...again], best.date.iso, o.strict, best.date)) {
       best.rejected = { date: best.date, reason: "unstable", again: parseDate(again, { strict: o.strict })?.iso ?? null };
       best.date = null;
     }
@@ -843,18 +870,32 @@ export function dateConf(text, probs, iso, strict = true) {
   return s / (b - a);
 }
 
-// shortest stretch [a, b) of chars c that parses to the date iso, or null
-function findDate(c, iso, strict) {
+// shortest stretch [a, b) of chars c that parses to the date iso, or null. With `like` (a parsed
+// date), a dekad also has to match its part ("2026.03初" does not confirm "2026.03末").
+function findDate(c, iso, strict, like) {
   for (let len = 1; len <= c.length; len++)
-    for (let a = 0; a + len <= c.length; a++)
-      if (parseDate(c.slice(a, a + len).join(""), { strict })?.iso === iso) return [a, a + len];
+    for (let a = 0; a + len <= c.length; a++) {
+      const d = parseDate(c.slice(a, a + len).join(""), { strict });
+      if (d?.iso === iso && (!like || sameDate(d, like))) return [a, a + len];
+    }
   return null;
 }
+
+// same date, a dekad also the same part (初 / 中 / 末)
+const sameDate = (d, e) => !!d && !!e && d.iso === e.iso && (d.precision !== "dekad") === (e.precision !== "dekad")
+  && (d.precision !== "dekad" || d.latest === e.latest);
 
 // confidence cut on the date characters (dateConf). On ExpDate tight and wide crops it gives the
 // same right/wrong counts as the whole-line mean at 0.8; at 0.9 it keeps more right reads
 // whose line carries junk ("2令8.3.15", "2021.04.18 까").
 const MIN_CONF = 0.8;
+// 初 vs 末 probability gap below which a dekad date is not handed out (synthetic dekad lines:
+// 初<->末 swaps 22 -> 1 for 4.5% fewer right dekad reads)
+const DEKAD_MARGIN = 0.9;
+// a year-month whose last character is closer than this (band heights) to the frame's right edge,
+// with ink running into that edge (contrast there >= EDGE_INK of the band's), is not handed out:
+// a dekad mark may have been cut off
+const EDGE_GAP = 2.0, EDGE_INK = 0.35;
 // second look on by default: on ExpDate photos it cut wrong dates 4.1% -> 1.2% for 1.8% fewer
 // right ones. In camera mode a missed frame is cheap (the next frame retries), a wrong date is not.
 const RECHECK = true;
@@ -884,7 +925,7 @@ function readTurns(model, img, o) {
 // Read with the text straightened by `angle` degrees (any angle; |angle| < 3 is left as is).
 function readGray(model, g, w, h, angle, o) {
   const skew = ((angle % 360) + 540) % 360 - 180; // -> [-180, 180)
-  const w0 = w, h0 = h; // frame size before straightening
+  const w0 = w, h0 = h, g0 = g; // frame before straightening
   if (Math.abs(skew) >= 3) ({ g, w, h } = rotateGray(g, w, h, skew));
   const lines = textLines(g, w, h);
   const cands = [[0, h]];
@@ -1048,10 +1089,42 @@ function readGray(model, g, w, h, angle, o) {
     const inp = toInput(buf, cw, nh, model);
     return recognize(model, inp.x, inp.w).text;
   };
+  // room between the date's last character and the frame's right edge, in band heights, measured
+  // in the frame as it came in (the straightened canvas is mapped back). A dekad mark cut off
+  // there ("2028.07初" -> "2028.07") leaves a plain year-month that runs to the month's end.
+  if (best.date && best.pos) {
+    const sp = findDate([...best.text], best.date.iso, o.strict);
+    if (sp) {
+      const bh = vy1 - vy0, kx = best.input.w * bh / model.h;
+      const xr = vx0 + best.pos[sp[1] - 1] * kx, yc = (vy0 + vy1) / 2;
+      let sx = xr;
+      if (w !== w0 || h !== h0) {
+        const a = skew * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);
+        sx = (xr - w / 2) * c - (yc - h / 2) * s + w0 / 2;
+      }
+      best.edgeGap = (w0 - sx) / bh;
+      // ink running into the frame's right edge at the date's height: contrast in the last two
+      // columns against the contrast along the band
+      let sy = yc;
+      if (w !== w0 || h !== h0) {
+        const a = skew * Math.PI / 180;
+        sy = (xr - w / 2) * Math.sin(a) + (yc - h / 2) * Math.cos(a) + h0 / 2;
+      }
+      const r0 = Math.max(0, Math.round(sy - 0.4 * bh)), r1 = Math.min(h0, Math.round(sy + 0.4 * bh));
+      let elo = Infinity, ehi = -Infinity, blo = Infinity, bhi = -Infinity;
+      for (let y = r0; y < r1; y++)
+        for (let x = 0; x < w0; x++) {
+          const v = g0[y * w0 + x];
+          if (v < blo) blo = v; if (v > bhi) bhi = v;
+          if (x >= w0 - 2) { if (v < elo) elo = v; if (v > ehi) ehi = v; }
+        }
+      best.edgeInk = r1 > r0 && bhi > blo ? (ehi - elo) / (bhi - blo) : 0;
+    }
+  }
   // another read with different framing already gave the same date: a second look for free
   const same = (a, b) => a[0] === b[0] && a[1] === b[1];
   // (a focus re-read counts too: it only keeps a date that the wider read also gave)
-  best.agree = !!best.date && reads.some((r) => r.date?.iso === best.date.iso && !(same(r.band, best.band) && same(r.cols, best.cols)));
+  best.agree = !!best.date && reads.some((r) => sameDate(r.date, best.date) && !(same(r.band, best.band) && same(r.cols, best.cols)));
   best.candidates = reads.map(({ text, conf, band }) => ({ text, conf, band }));
   return best;
 }

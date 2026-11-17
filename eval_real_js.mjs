@@ -55,7 +55,7 @@ function scoreSuite(name, items, mode) {
     if (digits(text) === digits(it.gt) && digits(it.gt)) dig++;
     if (it.iso && gotIso === it.iso) iso++;
     if (digits(text) !== digits(it.gt) || (it.iso && gotIso !== it.iso)) {
-      if (misses.length < (process.env.ALLMISS ? 1e9 : 15)) misses.push({ file: it.file, gt: it.gt, iso: it.iso, text, gotIso, conf: r.conf });
+      if (misses.length < (process.env.ALLMISS ? 1e9 : 15)) misses.push({ file: it.file, gt: it.gt, iso: it.iso, text, gotIso, conf: r.conf, why: r.rejected?.reason });
     }
   }
   console.log(
@@ -66,7 +66,7 @@ function scoreSuite(name, items, mode) {
     console.log(
       `   miss ${m.file} gt=${JSON.stringify(m.gt)} -> ${JSON.stringify(m.text)}` +
         (m.iso ? ` iso ${m.iso}->${m.gotIso}` : "") +
-        ` conf=${(m.conf * 100).toFixed(0)}%`
+        ` conf=${(m.conf * 100).toFixed(0)}%` + (m.why ? ` (${m.why})` : "")
     );
   }
 }

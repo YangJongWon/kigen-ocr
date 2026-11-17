@@ -100,6 +100,15 @@ LABEL_ONLY = ["賞味期限", "消費期限", "賞味期限:", "消費期限:", 
 
 ML_P = 0.3  # share of non-Japanese lines (Korean, Chinese, Taiwan, South-East Asia)
 
+# Dekad fine-tune (KIGEN_DEKAD=1): more 上旬/中旬/下旬/初/中/末 lines, digits leaning on the pairs
+# the model mixes up (0<->2: 07/27, 2020/2022), lines turned 0-90 deg, shrunk to a 640 px frame
+# and turned back like rotateGray does, and end glyphs clipped a little (the label stays).
+_DEKAD_ON = os.environ.get("KIGEN_DEKAD", "0") == "1"
+DEKAD_P = float(os.environ.get("KIGEN_DEKAD_P", 0.10)) if _DEKAD_ON else 0.0   # extra dekad lines (k == 4 is ~5% otherwise)
+CONF_P = 0.15 if _DEKAD_ON else 0.0    # ordinary dates with 0 / 2 / 7 heavy fields
+ROTRT_P = float(os.environ.get("KIGEN_ROTRT_P", 0.10)) if _DEKAD_ON else 0.0   # rotate, shrink, rotate back
+CLIP_P = 0.06 if _DEKAD_ON else 0.0    # per side: up to 8% of the end glyph's width cut off
+
 
 THAI_MFG, THAI_EXP, THAI_BB = "ผลิต", "หมดอายุ", "ควรบริโภคก่อน"
 
@@ -185,11 +194,18 @@ def rand_text():
     y = random.randint(2016, 2034)
     m = random.randint(1, 12)
     d = random.randint(1, 31)
+    conf = random.random() < CONF_P + DEKAD_P
+    if conf:  # 0 <-> 2 and 2 <-> 7 neighbours: 07/27, 02/20/22, 2020/2022/2027
+        y = random.choice([2020, 2022, 2027, 2026, 2028, 2029, 2025, y])
+        m = random.choice([7, 2, 10, 12, 1, 11, m])
+        d = random.choice([7, 27, 2, 20, 22, 17, 12, 10, 30, 28, 29, d])
     p = random.random() < 0.75
     sep = random.choices([".", "/", "-", " ", ""], [10, 4, 2, 2, 4])[0]
     if sep == "":
         p = True
     k = random.choices(range(11), [22, 22, 6, 9, 5, 9, 4, 3, 1.5, 9, 7])[0]
+    if random.random() < DEKAD_P:
+        k = 4
     yy = pad(y % 100, True)
     if k == 0:    # 2025.12.31
         s = f"{y}{sep}{pad(m, p)}{sep}{pad(d, p)}"
@@ -211,6 +227,11 @@ def rand_text():
             s = f"R{random.randint(1, 16)}.{pad(m, p)}" + random.choice(["", " "]) + random.choice(PART + ["月末"])
         else:
             s = f"令和{random.randint(1, 16)}年{m}月" + random.choice(PART)
+        if conf and random.random() < 0.5:  # 初 <-> 末, 上 <-> 下 side by side in training
+            s = re.sub(r"(上旬|中旬|下旬|初旬|月末|月初|初|中|末)$", lambda q: random.choice(
+                {"上旬": ["上旬", "下旬"], "下旬": ["下旬", "上旬"], "初旬": ["初旬", "下旬", "上旬"],
+                 "初": ["初", "末"], "末": ["末", "初"], "月末": ["月末", "月初"], "月初": ["月初", "月末"],
+                 "中旬": ["中旬", "上旬", "下旬"], "中": ["中", "末", "初"]}[q.group(1)]), s)
     elif k == 5:  # R7.12.31  H31.4.30  S / one-kanji 令7.12.31 平31.4.30 昭64.1.7
         e, base = random.choices([("R", 2018), ("H", 1988), ("S", 1925), ("令", 2018), ("平", 1988), ("昭", 1925)],
                                  [10, 2, 0.3, 5, 1.5, 0.3])[0]
@@ -564,6 +585,10 @@ def render(text, style=None, curve=None, edge=None):
     if random.random() < TOUCH_P:
         mr = int(th * random.uniform(0, 0.03))
     m = np.pad(m, ((mt + 2, mb + 2), (ml + 2, mr + 2)))[y0:y1 + mt + mb + 4, x0:x1 + ml + mr + 4]
+    if random.random() < CLIP_P:  # crop edge a little into the first glyph
+        m = m[:, ml + 2 + max(1, int(th * random.uniform(0.01, 0.08))):]
+    if random.random() < CLIP_P:
+        m = m[:, :m.shape[1] - (mr + 2 + max(1, int(th * random.uniform(0.01, 0.08))))]
     h, w = m.shape
     a = (m.astype(np.float32) / 255.0)[:, :, None]
 
@@ -604,8 +629,32 @@ def render(text, style=None, curve=None, edge=None):
             img, edge["done"] = out, True
     img = img.astype(np.uint8)
     img = geometric(img, curve)
+    if random.random() < ROTRT_P:
+        img = rot_roundtrip(img, th)
     img = photometric(img)
     return img
+
+
+def rot_roundtrip(img, th, ang=None, small=None):
+    """The label turned 0-90 deg in a 640 px frame, then straightened (rotateGray): two bilinear
+    resamplings at the size the date really has in the frame (text 11-24 px), with a small angle
+    error left over."""
+    small = small or random.uniform(11, 24)
+    s = min(1.0, small / th)
+    h, w = img.shape[:2]
+    img = cv2.resize(img, (max(4, int(w * s)), max(4, int(h * s))), interpolation=cv2.INTER_AREA)
+    h, w = img.shape[:2]
+    ang = random.uniform(0, 90) if ang is None else ang
+    D = int(math.ceil(math.hypot(w, h))) + 4
+    c = (D / 2, D / 2)
+    canvas = cv2.copyMakeBorder(img, (D - h) // 2, D - h - (D - h) // 2, (D - w) // 2, D - w - (D - w) // 2,
+                                cv2.BORDER_REPLICATE)
+    M1 = cv2.getRotationMatrix2D(c, ang, 1.0)
+    r = cv2.warpAffine(canvas, M1, (D, D), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    M2 = cv2.getRotationMatrix2D(c, -ang + random.uniform(-1.5, 1.5), 1.0)
+    r = cv2.warpAffine(r, M2, (D, D), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    y0, x0 = (D - h) // 2, (D - w) // 2
+    return r[y0:y0 + h, x0:x0 + w]
 
 
 # Embossed / debossed dates (pressed into a carton or can lid, no ink) look thick: what shows is

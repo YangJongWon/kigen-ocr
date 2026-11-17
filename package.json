@@ -5,7 +5,7 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "test": "node web/test-parse.mjs && node web/test-model.mjs"
+    "test": "node web/test-parse.mjs && node web/test-model.mjs && node web/test-guards.mjs"
   },
   "devDependencies": {
     "jpeg-js": "^0.4.4",
