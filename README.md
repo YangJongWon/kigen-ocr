@@ -77,6 +77,21 @@ Result:
 | `detBox` | with `det`: `{ box, score }`, the detector's box (in the straightened image) and its score |
 | `input` | the 32 px model input that was read (`{x, w}`), useful for debugging |
 
+### Whole views without a guide frame: `kigen-scene.js`
+
+For cameras with no frame to aim with (smart glasses, a photo of a whole pack):
+
+```js
+import { readScene, readCrops, guideAround } from "./kigen-scene.js";
+const r = readScene(model, det, img);   // whole view: the detector finds the date lines
+// or, when the platform finds text lines itself (Apple Vision on iOS):
+const r2 = readCrops(model, det, [{ img: crop, box, text: visionText }, ...]);
+```
+
+- `readScene` scans the view with guide-shaped windows at several sizes, then reads the strongest boxes. This is slow on large views: each window costs ~7 ms, so a 0.3 MP view takes ~2 s on a PC. `opts.keep: 0.3` makes it 2–3x faster but misses faint dot or etched dates.
+- `readCrops` / `readLines` read lines found elsewhere. `guideAround(box, w, h)` gives the crop readRegion expects. With `text` (another engine's reading of the line), `result.agree` tells that both engines read the same date.
+- Several different dates in view (manufacturing beside expiry, a misread lot code): no date, `rejected.reason` `"several"`, all of them in `dates`. It never guesses the latest or the most confident one. Production-labelled and yearless dates are left out.
+
 ### `parseDate(text, opts?) → date | null`
 Parses OCR text. `opts.today` (default: now) is used to judge plausibility and to infer the year of month-day dates; `opts.strict` as above.
 
