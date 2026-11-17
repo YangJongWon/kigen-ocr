@@ -505,6 +505,33 @@ function textLines(g, w, h) {
 }
 
 // pad each line, but never into its neighbour
+// Big print among dense small print, the default way (opts.bigMode: "big" = bigLines, "off"):
+// shrink the frame to 1/2 and 1/3 and blow it back up, twice, so small print melts into grey and
+// only big print keeps its edges, then split that into lines. On ExpDate camera frames (13 sets,
+// rule path) it gave +16 / +13 right and -4.7 / -1.9 points of wrong dates summed over bigLines,
+// ~5 ms more; frames where the date is small lost nothing.
+function downUpLines(g, w, h) {
+  const out = [];
+  for (const f of [2, 3]) {
+    let t = g;
+    for (let k = 0; k < 2; k++) {
+      const sw = Math.max(8, Math.round(w / f)), sh = Math.max(4, Math.round(h / f));
+      const sm = resizeArea(t, w, h, sw, sh), up = new Float32Array(w * h);
+      for (let y = 0; y < h; y++) {
+        const fy = Math.min(sh - 1, (y + 0.5) * sh / h - 0.5), y0 = Math.max(0, Math.floor(fy)), y1 = Math.min(sh - 1, y0 + 1), ay = Math.max(0, fy - y0);
+        for (let x = 0; x < w; x++) {
+          const fx = Math.min(sw - 1, (x + 0.5) * sw / w - 0.5), x0 = Math.max(0, Math.floor(fx)), x1 = Math.min(sw - 1, x0 + 1), ax = Math.max(0, fx - x0);
+          up[y * w + x] = (sm[y0 * sw + x0] * (1 - ax) + sm[y0 * sw + x1] * ax) * (1 - ay) + (sm[y1 * sw + x0] * (1 - ax) + sm[y1 * sw + x1] * ax) * ay;
+        }
+      }
+      t = up;
+    }
+    for (const l of textLines(t, w, h))
+      if (!out.some(([a, b]) => Math.abs(a - l[0]) + Math.abs(b - l[1]) < 0.15 * (l[1] - l[0]))) out.push(l);
+  }
+  return out.slice(0, 3);
+}
+
 function padLines(runs, h) {
   return runs.map(([a, b], i) => {
     const m = Math.round((b - a) * 0.25);
@@ -772,7 +799,7 @@ const weak = (r) => !r.date || r.date.order === "MD" || r.conf < 0.6;
 // A dropped date is kept in `rejected` ({date, reason}) so the UI can ask for a retake.
 export function readRegion(model, img, opts = {}) {
   const o = { strict: opts.strict ?? true, minConf: opts.minConf ?? MIN_CONF, focus: opts.focus, strips: opts.strips,
-    det: opts.det, detConf: opts.detConf, detCentre: opts.detCentre, detWiden: opts.detWiden };
+    det: opts.det, detConf: opts.detConf, detCentre: opts.detCentre, detWiden: opts.detWiden, bigMode: opts.bigMode };
   const best = readTurns(model, img, o);
   best.dateConf = best.date ? dateConf(best.text, best.probs, best.date.iso, o.strict) : null;
   // only a manufacturing date was found: never hand it out as the expiry
@@ -941,7 +968,7 @@ function readGray(model, g, w, h, angle, o) {
   // misread date at conf 0.6-0.9, which the recheck then throws away)
   const fromLine = lines.some(([a, b]) => a === best.band[0] && b === best.band[1]);
   if (!fast && (weak(best) || best.conf < 0.9 || !fromLine))
-    for (const l of bigLines(g, w, h, lines.raw))
+    for (const l of (o.bigMode === "big" ? bigLines(g, w, h, lines.raw) : o.bigMode === "off" ? [] : downUpLines(g, w, h)))
       if (!near(l)) { cands.push(l); lines.push(l); read(l[0], l[1], ...inkCols(g, w, l[0], l[1])); }
   // no solid date: look for lines strip by strip (box framed loosely, other text beside the date).
   // Only then — on boxes that already read well they cost ~25ms and add wrong dates.

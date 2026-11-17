@@ -155,7 +155,11 @@ if (process.env.CMP) {
   for (const [name, frames] of Object.entries(sets)) {
     if (!frames.length) continue;
     const line = [];
-    for (const [label, opts] of [["strips off", { strips: false }], ["strips", {}], ...(det ? [["det", { det }]] : [])]) {
+    // BIGCMP=1: big-print line finders of the rule path side by side (no detector)
+    const cols = process.env.BIGCMP === "det" ? [["det bigLines", { det, bigMode: "big" }], ["det downup", { det }]]
+      : process.env.BIGCMP ? [["big off", { bigMode: "off" }], ["bigLines", { bigMode: "big" }], ["downup", {}]]
+      : [["strips off", { strips: false }], ["strips", {}], ...(det ? [["det", { det }]] : [])];
+    for (const [label, opts] of cols) {
       let right = 0, wrong = 0, t = performance.now();
       for (const f of frames) { const r = K.readRegion(model, f.img, opts); if (r.date) r.date.iso === f.gt ? right++ : wrong++; }
       const n = frames.length;
