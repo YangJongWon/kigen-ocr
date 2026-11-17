@@ -197,6 +197,22 @@ function conv2d(inp, C, H, W, L) {
 
 function maxpool(a, C, H, W, kh, kw) {
   const Ho = (H / kh) | 0, Wo = (W / kw) | 0, out = new Float32Array(C * Ho * Wo);
+  // the model's pools (2x2, 2x1) without the generic inner loops: ~20% of recognize() before
+  if (kh === 2 && (kw === 2 || kw === 1)) {
+    let o = 0;
+    for (let c = 0; c < C; c++)
+      for (let y = 0; y < Ho; y++) {
+        let r0 = (c * H + 2 * y) * W, r1 = r0 + W;
+        if (kw === 2)
+          for (let x = 0; x < Wo; x++, r0 += 2, r1 += 2) {
+            const m0 = a[r0] > a[r0 + 1] ? a[r0] : a[r0 + 1], m1 = a[r1] > a[r1 + 1] ? a[r1] : a[r1 + 1];
+            out[o++] = m0 > m1 ? m0 : m1;
+          }
+        else
+          for (let x = 0; x < Wo; x++, r0++, r1++) out[o++] = a[r0] > a[r1] ? a[r0] : a[r1];
+      }
+    return [out, C, Ho, Wo];
+  }
   for (let c = 0; c < C; c++)
     for (let y = 0; y < Ho; y++)
       for (let x = 0; x < Wo; x++) {
@@ -294,13 +310,15 @@ export function toGray(img) {
 function resizeArea(g, w, h, nw, nh) { // box-filter resize (≈ cv2.INTER_AREA)
   const tmp = new Float32Array(nw * h), out = new Float32Array(nw * nh);
   const sx = w / nw, sy = h / nh;
-  for (let x = 0; x < nw; x++) {
-    const x0 = x * sx, x1 = x0 + sx;
-    for (let y = 0; y < h; y++) {
+  // (rows outer: reads along memory; same sums in the same order as columns outer)
+  for (let y = 0; y < h; y++) {
+    const gy = y * w, ty = y * nw;
+    for (let x = 0; x < nw; x++) {
+      const x0 = x * sx, x1 = x0 + sx;
       let acc = 0;
       for (let u = Math.floor(x0); u < Math.ceil(x1) && u < w; u++)
-        acc += g[y * w + u] * (Math.min(x1, u + 1) - Math.max(x0, u));
-      tmp[y * nw + x] = acc / sx;
+        acc += g[gy + u] * (Math.min(x1, u + 1) - Math.max(x0, u));
+      tmp[ty + x] = acc / sx;
     }
   }
   for (let y = 0; y < nh; y++) {
@@ -319,8 +337,9 @@ function resizeArea(g, w, h, nw, nh) { // box-filter resize (≈ cv2.INTER_AREA)
 export function toInput(g, w, h, model) {
   const H = model.h, nw = Math.min(model.maxw, Math.max(8, Math.round(w * H / h)));
   const r = resizeArea(g, w, h, nw, H);
-  const s = Float32Array.from(r).sort();
-  const lo = s[Math.floor(0.02 * (s.length - 1))], hi = s[Math.floor(0.98 * (s.length - 1))];
+  // 2% / 98% points of the sorted values, by quickselect (no full sort)
+  const s = Float32Array.from(r);
+  const lo = kth(s, Math.floor(0.02 * (s.length - 1))), hi = kth(s, Math.floor(0.98 * (s.length - 1)));
   const d = Math.max(hi - lo, 1);
   const W4 = Math.ceil(nw / 4) * 4, x = new Float32Array(H * W4);
   for (let y = 0; y < H; y++)
