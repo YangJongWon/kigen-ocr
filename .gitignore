@@ -6,6 +6,9 @@ node_modules/
 
 # third-party data: license not settled, evaluation only — do not publish
 datasets/
+server/var/
+server/.venv/
+*.egg-info/
 
 # training outputs and logs (publish only web/kigen.bin)
 *.pt
