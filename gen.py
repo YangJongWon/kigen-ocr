@@ -6,6 +6,7 @@ backgrounds with curvature, glare, blur and JPEG damage.
 """
 import math
 import random
+import re
 
 import cv2
 import numpy as np
@@ -533,8 +534,10 @@ def neighbor(canvas, th, mt, mb, ink):
         canvas[:] = np.array(img, np.float32)
 
 
-def render(text, style=None, curve=None):
-    style = style or random.choices(["print", "dot", "faint"], [4, 5, 1.5])[0]
+def render(text, style=None, curve=None, edge=None):
+    """edge: {"side": "L"|"R", "cut": bool} -> a frame boundary at that end (see frame_edge);
+    edge["done"] is set when it was drawn (with cut: the end glyph is then partly gone)."""
+    style = style or random.choices(["print", "dot", "faint", "emboss"], [4, 5, 1.5, EMBOSS_W])[0]
     if style == "dot5x7" or (style == "dot" and random.random() < 0.55 and dot_ok(text)):
         style = "dot"
         m = dot_matrix(text)
@@ -542,6 +545,8 @@ def render(text, style=None, curve=None):
         if style == "dot5x7":
             style = "dot"
         m = line_mask(text)
+        if style == "emboss" and random.random() < 0.3:  # pin-dot embossing
+            m = dotify(m, text)
         if style == "dot":
             m = dotify(m, text)
     ys, xs = np.nonzero(m > 40)
@@ -552,13 +557,23 @@ def render(text, style=None, curve=None):
     # margins (tight crops and loose crops)
     mt, mb = int(th * random.uniform(0.05, 0.6)), int(th * random.uniform(0.05, 0.6))
     ml, mr = int(th * random.uniform(0.05, 1.5)), int(th * random.uniform(0.05, 1.5))
+    # tight crops: a whole end glyph touching the crop edge is still read (with the cut samples
+    # of frame_edge alone the model dropped it: "2022.08.31" -> "2022.08.3", a valid wrong date)
+    if random.random() < TOUCH_P:
+        ml = int(th * random.uniform(0, 0.03))
+    if random.random() < TOUCH_P:
+        mr = int(th * random.uniform(0, 0.03))
     m = np.pad(m, ((mt + 2, mb + 2), (ml + 2, mr + 2)))[y0:y1 + mt + mb + 4, x0:x1 + ml + mr + 4]
     h, w = m.shape
     a = (m.astype(np.float32) / 255.0)[:, :, None]
 
     bg = background(h, w)
     lum = bg.mean()
-    if style == "faint":  # laser etch / emboss: low contrast, edge highlight
+    if style != "emboss" and random.random() < UNDER_P:
+        under_text(bg, th, mt + 2, h, w)
+    if style == "emboss":  # pressed into the box / can lid, no ink: light on one slope, shadow on the other
+        img = emboss(bg, a[:, :, 0], th)
+    elif style == "faint":  # laser etch: low contrast, edge highlight
         delta = random.choice([-1, 1]) * random.uniform(25, 70)
         ink = np.clip(bg.mean((0, 1)) + delta, 0, 255)
         sh = np.roll(a, (1, 1), (0, 1))
@@ -579,12 +594,183 @@ def render(text, style=None, curve=None):
     # legibility: ink must differ from its own surrounding background
     bgl = cv2.blur(bg.mean(2), (9, 9))
     diff = np.abs(img.mean(2) - bgl)[on]
-    if style != "faint" and np.mean(diff < 45) > 0.08:
+    if style not in ("faint", "emboss") and np.mean(diff < 45) > 0.08:
         return None
+    if random.random() < LINES_P:
+        cross_lines(img, th)
+    if edge is not None and not (edge["cut"] and style == "dot"):
+        out = frame_edge(img, a[:, :, 0], th, edge["side"], edge["cut"])
+        if out is not None:
+            img, edge["done"] = out, True
     img = img.astype(np.uint8)
     img = geometric(img, curve)
     img = photometric(img)
     return img
+
+
+# Embossed / debossed dates (pressed into a carton or can lid, no ink) look thick: what shows is
+# a lit slope next to a shaded one, a pair as wide as the bevel, often with the stroke centre at
+# background level. Rendered from a height map (the glyph mask blurred by the bevel) lit from a
+# random direction; raised or sunk, on paperboard grain or brushed metal.
+EMBOSS_W = 1.0   # style weight (print 4, dot 5, faint 1.5)
+
+
+def emboss(bg, a, th):
+    h, w = a.shape
+    bevel = th * random.uniform(0.03, 0.12)
+    hm = cv2.GaussianBlur(a.astype(np.float32), (0, 0), bevel) * random.choice([1, -1])
+    gx, gy = cv2.Sobel(hm, cv2.CV_32F, 1, 0), cv2.Sobel(hm, cv2.CV_32F, 0, 1)
+    t = random.uniform(0, 2 * math.pi)
+    shade = gx * math.cos(t) + gy * math.sin(t)
+    shade = shade / (np.abs(shade).max() + 1e-6) * random.uniform(30, 110)
+    if random.random() < 0.5:  # light falls off: shadows deeper than highlights, or the reverse
+        shade = np.where(shade > 0, shade * random.uniform(0.3, 1), shade)
+    base = bg.copy()
+    if random.random() < 0.5:  # plain packaging: carton white, kraft, silver
+        base[:] = np.clip(np.array([random.uniform(150, 245)] * 3) + np.random.uniform(-25, 15, 3), 0, 255)
+    r = random.random()
+    if r < 0.35:  # paperboard grain
+        n = cv2.GaussianBlur(np.random.randn(h, w).astype(np.float32), (0, 0), random.uniform(0.6, 1.5))
+        base += n[:, :, None] * random.uniform(4, 14)
+    elif r < 0.6:  # brushed metal: streaks along the line
+        n = cv2.GaussianBlur(np.random.randn(h, w).astype(np.float32), (0, 0), sigmaX=random.uniform(4, 12), sigmaY=0.6)
+        base += n[:, :, None] * random.uniform(10, 30)
+    img = base + shade[:, :, None]
+    if random.random() < 0.2:  # a little ink or dirt caught in the dents
+        img = img * (1 - a[:, :, None] * random.uniform(0.05, 0.3))
+    return np.clip(img, 0, 255)
+
+
+# Another string printed under the date (inkjet date over the package design): different colour /
+# size, partly or wholly across the date's rows. The label stays the date only. Same colour, size and
+# font would be unreadable for anyone; those are not made.
+UNDER_P = 0.10
+
+
+def under_text(bg, th, top, h, w):
+    lum = bg.mean()
+    for _ in range(random.randint(1, 2)):
+        size = max(8, int(th * random.uniform(0.5, 1.6)))
+        s = "".join(random.choice(CLUTTER + "0123456789ABCDEFGHJKLMNPRSTUVWXYZ%g") for _ in range(random.randint(3, 16)))
+        spec = random.choice(JP_FONTS)
+        f = font(spec, size)
+        # a design colour clearly apart from both the background and (usually) the date ink
+        if random.random() < 0.5:
+            col = np.random.uniform(0, 255, 3)
+        else:
+            v = lum + random.choice([-1, 1]) * random.uniform(40, 90)
+            col = np.full(3, np.clip(v, 0, 255))
+        img = Image.fromarray(np.clip(bg, 0, 255).astype(np.uint8))
+        y = top + int(th * random.uniform(-0.6, 0.6)) - int(size * 0.2)
+        ImageDraw.Draw(img).text((random.randint(-w // 3, w // 2), y), s, fill=tuple(int(c) for c in col), font=f)
+        bg[:] = np.array(img, np.float32)
+
+
+# Lines across the glyphs (crosshatch film, white print lines, a stripe of the design, a bar):
+# drawn over the date.
+LINES_P = 0.08
+
+
+def cross_lines(img, th):
+    h, w = img.shape[:2]
+    col = random.choice([np.full(3, random.uniform(200, 255)), np.full(3, random.uniform(0, 60)), np.random.uniform(0, 255, 3)])
+    alpha = random.uniform(0.4, 1)
+    over = img.copy()
+    kind = random.random()
+    if kind < 0.3:  # crosshatch
+        step = max(4, int(th * random.uniform(0.3, 0.8)))
+        for sgn in (1, -1):
+            for x in range(-h, w + h, step):
+                cv2.line(over, (x, 0), (x + sgn * h, h), col.tolist(), 1)
+    elif kind < 0.8:  # a few straight lines / stripes
+        for _ in range(random.randint(1, 4)):
+            t = max(1, int(th * random.uniform(0.04, 0.25)))
+            if random.random() < 0.3:  # near vertical bar
+                x = random.randint(0, w - 1)
+                cv2.line(over, (x, 0), (x + random.randint(-h // 3, h // 3), h), col.tolist(), t)
+            else:
+                y0, y1 = random.randint(-h // 2, h + h // 2), random.randint(-h // 2, h + h // 2)
+                cv2.line(over, (0, y0), (w, y1), col.tolist(), t)
+    else:  # scribble / scratch
+        pts = np.array([[random.randint(0, w), random.randint(0, h)] for _ in range(random.randint(3, 7))], np.int32)
+        cv2.polylines(over, [pts], False, col.tolist(), max(1, int(th * 0.06)))
+    img[:] = img * (1 - alpha) + over * alpha
+
+
+# Frame boundaries. readRegion straightens a tilted guide crop with rotateGray, which fills what
+# lies outside the crop with its border pixels stretched outwards: a slanted edge (the tilt, here
+# 15-60° from vertical) with streaks beyond it. The edge can also run through the first / last
+# glyph of the date. Without such samples the model read the streaks as digits and filled a cut
+# glyph with an invented one ("2027年" cut to "027年" came out as "7年..." / "2027年").
+_EDGE_ON = os.environ.get("KIGEN_EDGE", "0") == "1"  # off: the shipped model was trained without them (see edge_eval.py)
+CUT_P = 0.10 if _EDGE_ON else 0.0  # the end glyph mostly cut off (5-45% of its ink left); the label drops it
+EDGE_P = 0.08 if _EDGE_ON else 0.0  # the edge in the margin or grazing the end glyph (>= 90% left); the label stays
+TOUCH_P = 0.15 if _EDGE_ON else 0.0  # per side: a whole end glyph touching the crop edge (no margin); the label stays
+
+
+def glyph_runs(a, th):
+    """Column runs of ink (a: HxW mask 0..1), gaps under 0.06 x th bridged."""
+    col = a.max(0) > 0.5
+    runs, x = [], 0
+    w = len(col)
+    while x < w:
+        if not col[x]:
+            x += 1
+            continue
+        x1 = x
+        while x1 + 1 < w and col[x1 + 1]:
+            x1 += 1
+        if runs and x - runs[-1][1] < 0.06 * th:
+            runs[-1][1] = x1 + 1
+        else:
+            runs.append([x, x1 + 1])
+        x = x1 + 1
+    return runs
+
+
+def frame_edge(img, a, th, side, cut):
+    """Slanted frame edge at the left (side "L") or right end, with rotateGray's streaks beyond it.
+    cut: through the end glyph, leaving 5-45% of its ink and every other glyph whole; else in the
+    margin or grazing the end glyph (>= 90% of it left). Between the two (45-90%) is not taught:
+    neither "drop it" nor "read it" is safe there. Returns the new image or None (no room / glyphs touch)."""
+    if side == "R":
+        out = frame_edge(img[:, ::-1], a[:, ::-1], th, "L", cut)
+        return None if out is None else np.ascontiguousarray(out[:, ::-1])
+    h, w = a.shape
+    runs = glyph_runs(a, th)
+    if len(runs) < 2:
+        return None
+    (g0, g1), nxt = runs[0], runs[1][0]
+    if cut and not (0.2 * th <= g1 - g0 <= 1.3 * th):
+        return None  # touching glyphs: not one character
+    ys = np.nonzero(a.max(1) > 0.5)[0]
+    ym = (ys.min() + ys.max()) / 2
+    Y, X = np.mgrid[0:h, 0:w].astype(np.float32)
+    ink0, rest = a[:, g0:g1].sum(), a[:, g1:].sum()
+    for _ in range(12):
+        phi = math.radians(random.uniform(15, 60)) * random.choice([-1, 1])
+        graze = not cut and (g0 < 0.15 * th or random.random() < 0.5)
+        if cut:
+            xm = g0 + random.uniform(0.45, 0.95) * (g1 - g0)
+        elif graze:
+            xm = g0 + random.uniform(0, 0.2) * (g1 - g0)
+        else:
+            xm = random.uniform(0.1, 0.9) * g0
+        outside = X < xm + (Y - ym) * math.tan(phi)
+        kept = a[:, g0:g1][~outside[:, g0:g1]].sum() / max(ink0, 1e-6)
+        if a[:, g1:][outside[:, g1:]].sum() > 0.01 * rest or outside.mean() > 0.6 or not outside.any():
+            continue
+        if (cut and 0.05 <= kept <= 0.45) or (graze and kept >= 0.9) or (not cut and not graze and kept > 0.99):
+            break
+    else:
+        return None
+    # beyond the edge: the pixel where the edge's normal through it meets the edge
+    n = np.float32([-math.cos(phi), math.sin(phi)])
+    d = (X - xm) * n[0] + (Y - ym) * n[1]
+    mx, my = X - d * n[0], Y - d * n[1]
+    src = img.astype(np.float32)
+    far = cv2.remap(src, mx.astype(np.float32), my.astype(np.float32), cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    return np.where(outside[:, :, None], far, src)
 
 
 def geometric(img, curve=None):
@@ -672,10 +858,30 @@ def make_batch(args):
     return [sample() for _ in range(n)]
 
 
+def edge_plan(vis, t):
+    """Pick a frame edge for this line (or None): a cut needs a digit / Latin letter at that end,
+    the same glyph on screen and in the label."""
+    import unicodedata
+    r = random.random()
+    if r >= CUT_P + EDGE_P:
+        return None
+    side = random.choice("LR")
+    if r >= CUT_P:
+        return {"side": side, "cut": False}
+    v = unicodedata.normalize("NFKC", vis).strip()
+    end = (lambda z: z[0]) if side == "L" else (lambda z: z[-1])
+    if not v or not t or not re.match(r"[0-9A-Z]", end(t)) or end(v) != end(t):
+        return None
+    return {"side": side, "cut": True}
+
+
 def sample():
     while True:
         vis, t = rand_text()
-        img = render(vis)
+        edge = edge_plan(vis, t)
+        img = render(vis, edge=edge)
+        if edge and edge.get("done") and edge["cut"]:
+            t = " ".join((t[1:] if edge["side"] == "L" else t[:-1]).split())
         if img is not None and t:
             return to_input(img), t
 
