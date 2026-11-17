@@ -354,4 +354,80 @@
             (local.set $ob (i32.add (local.get $ob) (local.get $cs)))
             (v128.store (local.get $ob) (f32x4.max (f32x4.add (f32x4.mul (f32x4.convert_i32x4_s (local.get $a30)) (local.get $s3)) (local.get $b3)) (local.get $floor)))))
         (local.set $o (i32.add (local.get $o) (i32.const 4)))
-        (br $oloop)))))
+        (br $oloop))));; 2 x kw max pool (kw = 1 or 2) of a conv output: channel c at src + c * P4 floats, rows of W.
+;; dst gets C x (H/2) x (W/kw) floats, packed. Saves copying the full conv output out of wasm and
+;; pooling it in JS.
+  (func (export "maxpool2")
+    (param $src i32) (param $C i32) (param $H i32) (param $W i32) (param $P4 i32)
+    (param $kw i32) (param $dst i32)
+    (local $c i32) (local $y i32) (local $x i32) (local $Ho i32) (local $Wo i32)
+    (local $r0 i32) (local $r1 i32) (local $rs i32) (local $m0 v128) (local $m1 v128)
+    (local.set $Ho (i32.shr_u (local.get $H) (i32.const 1)))
+    (local.set $Wo (i32.div_u (local.get $W) (local.get $kw)))
+    (local.set $rs (i32.shl (local.get $W) (i32.const 2)))
+    (local.set $c (i32.const 0))
+    (block $cdone
+      (loop $cloop
+        (br_if $cdone (i32.ge_u (local.get $c) (local.get $C)))
+        (local.set $y (i32.const 0))
+        (block $ydone
+          (loop $yloop
+            (br_if $ydone (i32.ge_u (local.get $y) (local.get $Ho)))
+            (local.set $r0 (i32.add (local.get $src)
+              (i32.shl (i32.add (i32.mul (local.get $c) (local.get $P4))
+                                (i32.mul (i32.shl (local.get $y) (i32.const 1)) (local.get $W)))
+                       (i32.const 2))))
+            (local.set $r1 (i32.add (local.get $r0) (local.get $rs)))
+            (local.set $x (i32.const 0))
+            (if (i32.eq (local.get $kw) (i32.const 2))
+              (then
+                (block $v2done
+                  (loop $v2
+                    (br_if $v2done (i32.gt_u (i32.add (local.get $x) (i32.const 4)) (local.get $Wo)))
+                    (local.set $m0 (f32x4.max (v128.load align=4 (local.get $r0)) (v128.load align=4 (local.get $r1))))
+                    (local.set $m1 (f32x4.max (v128.load offset=16 align=4 (local.get $r0)) (v128.load offset=16 align=4 (local.get $r1))))
+                    (v128.store align=4 (local.get $dst)
+                      (f32x4.max
+                        (i8x16.shuffle 0 1 2 3 8 9 10 11 16 17 18 19 24 25 26 27 (local.get $m0) (local.get $m1))
+                        (i8x16.shuffle 4 5 6 7 12 13 14 15 20 21 22 23 28 29 30 31 (local.get $m0) (local.get $m1))))
+                    (local.set $r0 (i32.add (local.get $r0) (i32.const 32)))
+                    (local.set $r1 (i32.add (local.get $r1) (i32.const 32)))
+                    (local.set $dst (i32.add (local.get $dst) (i32.const 16)))
+                    (local.set $x (i32.add (local.get $x) (i32.const 4)))
+                    (br $v2)))
+                (block $s2done
+                  (loop $s2
+                    (br_if $s2done (i32.ge_u (local.get $x) (local.get $Wo)))
+                    (f32.store (local.get $dst)
+                      (f32.max (f32.max (f32.load (local.get $r0)) (f32.load offset=4 (local.get $r0)))
+                               (f32.max (f32.load (local.get $r1)) (f32.load offset=4 (local.get $r1)))))
+                    (local.set $r0 (i32.add (local.get $r0) (i32.const 8)))
+                    (local.set $r1 (i32.add (local.get $r1) (i32.const 8)))
+                    (local.set $dst (i32.add (local.get $dst) (i32.const 4)))
+                    (local.set $x (i32.add (local.get $x) (i32.const 1)))
+                    (br $s2))))
+              (else
+                (block $v1done
+                  (loop $v1
+                    (br_if $v1done (i32.gt_u (i32.add (local.get $x) (i32.const 4)) (local.get $Wo)))
+                    (v128.store align=4 (local.get $dst)
+                      (f32x4.max (v128.load align=4 (local.get $r0)) (v128.load align=4 (local.get $r1))))
+                    (local.set $r0 (i32.add (local.get $r0) (i32.const 16)))
+                    (local.set $r1 (i32.add (local.get $r1) (i32.const 16)))
+                    (local.set $dst (i32.add (local.get $dst) (i32.const 16)))
+                    (local.set $x (i32.add (local.get $x) (i32.const 4)))
+                    (br $v1)))
+                (block $s1done
+                  (loop $s1
+                    (br_if $s1done (i32.ge_u (local.get $x) (local.get $Wo)))
+                    (f32.store (local.get $dst) (f32.max (f32.load (local.get $r0)) (f32.load (local.get $r1))))
+                    (local.set $r0 (i32.add (local.get $r0) (i32.const 4)))
+                    (local.set $r1 (i32.add (local.get $r1) (i32.const 4)))
+                    (local.set $dst (i32.add (local.get $dst) (i32.const 4)))
+                    (local.set $x (i32.add (local.get $x) (i32.const 1)))
+                    (br $s1)))))
+            (local.set $y (i32.add (local.get $y) (i32.const 1)))
+            (br $yloop)))
+        (local.set $c (i32.add (local.get $c) (i32.const 1)))
+        (br $cloop))))
+)
