@@ -986,7 +986,54 @@ def edge_plan(vis, t):
     return {"side": side, "cut": True}
 
 
+_REAL = None
+_REAL_ON = os.environ.get("KIGEN_REAL", "0") == "1"
+# share of training lines taken from real photos (real_lines.py: Products-Real train split only).
+# Synthetic-only fine-tunes raised wrong reads on camera frames; real lines anchor the model.
+REAL_P = float(os.environ.get("KIGEN_REAL_P", 0.3)) if _REAL_ON else 0.0
+
+
+def real_sample():
+    """A real date line, framed / shrunk / blurred / tilted a little at random -> (x, text)."""
+    global _REAL
+    if _REAL is None:
+        import pickle
+        _REAL = pickle.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "datasets/real_lines_train.pkl"), "rb"))
+    r = random.choice(_REAL)
+    g, (x0, y0, x1, y1) = r["g"].astype(np.float32), r["box"]
+    h = y1 - y0
+    if random.random() < 0.5:  # slight tilt left over after straightening
+        a = random.uniform(-4, 4)
+        M = cv2.getRotationMatrix2D(((x0 + x1) / 2, (y0 + y1) / 2), a, 1.0)
+        g = cv2.warpAffine(g, M, (g.shape[1], g.shape[0]), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    H, W = g.shape
+    t0, t1 = random.uniform(0.0, 0.4) * h, random.uniform(0.0, 0.4) * h
+    # (narrow sides: wider ones bring in unlabelled glyphs beside the date, "2021.07.13.A", which
+    # would teach the model to drop glyphs it sees)
+    l0, l1 = random.uniform(0.05, 0.35) * h, random.uniform(0.05, 0.35) * h
+    c = g[max(0, int(y0 - t0)):min(H, int(y1 + t1 + 1)), max(0, int(x0 - l0)):min(W, int(x1 + l1 + 1))]
+    if c.shape[0] < 4 or c.shape[1] < 8:
+        return None
+    th = random.uniform(9, 40)  # text height in the camera frame
+    if th < h:
+        k = th / h
+        c = cv2.resize(c, (max(8, int(c.shape[1] * k)), max(4, int(c.shape[0] * k))), interpolation=cv2.INTER_AREA)
+    if random.random() < 0.3:
+        c = cv2.GaussianBlur(c, (0, 0), random.uniform(0.3, 1.0))
+    if random.random() < 0.3:
+        c = np.clip(c + np.random.randn(*c.shape) * random.uniform(2, 6), 0, 255)
+    c = c.astype(np.uint8)
+    if random.random() < 0.3:
+        c = cv2.imdecode(cv2.imencode(".jpg", c, [cv2.IMWRITE_JPEG_QUALITY, random.randint(40, 85)])[1], cv2.IMREAD_GRAYSCALE)
+    return to_input(c), r["text"]
+
+
 def sample():
+    if REAL_P and random.random() < REAL_P:
+        while True:
+            s = real_sample()
+            if s is not None:
+                return s
     while True:
         vis, t = rand_text()
         edge = edge_plan(vis, t)

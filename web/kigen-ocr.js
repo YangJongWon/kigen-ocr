@@ -850,6 +850,35 @@ function rotateGray(g, w, h, deg, bg) {
   return { g: out, w: nw, h: nh };
 }
 
+// Region [x0,x1) x [y0,y1) of a gray image with ink strokes thinner than 2r+1 px removed: a gray
+// closing (dark ink) or opening (light ink, by the region's own polarity) with a (2r+1) square,
+// read from r px around the region. -> {g, w, x0}
+function thinOff(G, W, H, x0, x1, y0, y1, r) {
+  const X0 = Math.max(0, x0 - 2 * r), X1 = Math.min(W, x1 + 2 * r), Y0 = Math.max(0, y0 - 2 * r), Y1 = Math.min(H, y1 + 2 * r);
+  const w = X1 - X0, h = Y1 - Y0, a = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) a.set(G.subarray((Y0 + y) * W + X0, (Y0 + y) * W + X1), y * w);
+  const srt = Float32Array.from(a).sort(), md = srt[srt.length >> 1];
+  const dark = md - srt[Math.floor(srt.length * 0.05)] >= srt[Math.floor(srt.length * 0.95)] - md;
+  const pass = (src, takeMax) => { // separable (2r+1) square max / min
+    const t = new Float32Array(w * h), out = new Float32Array(w * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      let m = src[y * w + x];
+      for (let d = Math.max(0, x - r); d <= Math.min(w - 1, x + r); d++) { const v = src[y * w + d]; m = takeMax ? Math.max(m, v) : Math.min(m, v); }
+      t[y * w + x] = m;
+    }
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      let m = t[y * w + x];
+      for (let d = Math.max(0, y - r); d <= Math.min(h - 1, y + r); d++) { const v = t[d * w + x]; m = takeMax ? Math.max(m, v) : Math.min(m, v); }
+      out[y * w + x] = m;
+    }
+    return out;
+  };
+  const c = pass(pass(a, dark), !dark);
+  const g = new Float32Array((x1 - x0) * (y1 - y0));
+  for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) g[(y - y0) * (x1 - x0) + x - x0] = c[(y - Y0) * w + x - X0];
+  return { g, w: x1 - x0, x0 };
+}
+
 // Paper level of a gray frame: the median (most of a frame is background).
 function paperLevel(g) {
   const k = Math.max(1, Math.floor(g.length / 4000)), a = new Float32Array(Math.ceil(g.length / k));
@@ -942,7 +971,7 @@ const weak = (r) => !r.date || r.date.order === "MD" || r.conf < 0.6;
 export function readRegion(model, img, opts = {}) {
   const o = { strict: opts.strict ?? true, minConf: opts.minConf ?? MIN_CONF, focus: opts.focus, strips: opts.strips,
     det: opts.det, detConf: opts.detConf, detCentre: opts.detCentre, detWiden: opts.detWiden, bigMode: opts.bigMode,
-    skewBoth: opts.skewBoth, around: opts.around, fill: opts.fill ?? FILL, extGap: opts.extGap ?? EXT_GAP, extJoin: opts.extJoin ?? EXT_JOIN };
+    skewBoth: opts.skewBoth, edgeThin: opts.edgeThin, around: opts.around, fill: opts.fill ?? FILL, extGap: opts.extGap ?? EXT_GAP, extJoin: opts.extJoin ?? EXT_JOIN };
   const best = readTurns(model, img, o);
   best.dateConf = best.date ? dateConf(best.text, best.probs, best.date.iso, o.strict) : null;
   // only a manufacturing date was found: never hand it out as the expiry
@@ -1036,6 +1065,8 @@ const DEKAD_MARGIN = 0.9;
 // frame's border, with ink there (contrast >= EDGE_INK of the date's own), is not handed out:
 // a dekad mark may have been cut off
 const EDGE_GAP = 2.0, EDGE_INK = 0.35;
+// ink thinner than this (band heights) at the border does not count for the edge guard (opts.edgeThin; 0 = off)
+const EDGE_THIN = 0.03;
 // opts.around: an end of the read line closer than EXT_GAP band heights to the frame's border is
 // followed past it, over ink gaps under EXT_JOIN, at most EXT_LEN band heights
 const EXT_GAP = 3, EXT_JOIN = 1.6, EXT_LEN = 6, EXT_MIN_SKEW = 8;
@@ -1304,15 +1335,22 @@ function readGray(model, g, w, h, angle, o) {
       best.edgeGap = (xb - xr) / bh;
       const ya = Math.max(0, Math.round(yc - dy)), yb = Math.min(GH, Math.round(yc + dy) + 1);
       const ea = Math.max(0, Math.floor(xb - Math.max(2, 0.15 * bh))), eb = Math.min(GW, Math.ceil(xb) + 1);
+      // Only ink about as heavy as the date's counts: strokes thinner than ~EDGE_THIN band heights
+      // (small print the date was stamped over, "2023.11" across a 栄養成分表示 table) are closed
+      // away first; a cut 初 / 上旬 has the date's own strokes and stays.
+      const da = Math.max(0, Math.floor(vx0)), db = Math.min(GW, Math.ceil(xr));
+      const rr = o.edgeThin ?? EDGE_THIN, r = rr > 0 ? Math.max(1, Math.round(rr * bh)) : 0;
+      const C = r ? thinOff(G, GW, GH, Math.min(da, ea), Math.max(db, eb), ya, yb, r) : null;
+      const at = (x, y) => C ? C.g[(y - ya) * C.w + (x - C.x0)] : G[y * GW + x];
       let elo = Infinity, ehi = -Infinity, blo = Infinity, bhi = -Infinity;
       for (let y = ya; y < yb; y++) {
-        for (let x = Math.max(0, Math.floor(vx0)); x < Math.min(GW, Math.ceil(xr)); x++) {
-          const v = G[y * GW + x];
+        for (let x = da; x < db; x++) {
+          const v = at(x, y);
           if (v < blo) blo = v; if (v > bhi) bhi = v;
         }
         for (let x = ea; x < eb; x++) {
           if (!valid(x, y)) continue;
-          const v = G[y * GW + x];
+          const v = at(x, y);
           if (v < elo) elo = v; if (v > ehi) ehi = v;
         }
       }
