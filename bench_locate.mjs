@@ -10,6 +10,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import jpeg from "jpeg-js";
 import * as K from "./web/kigen-ocr.js";
+if (process.env.SKEWNORM === "0") K.setSkewNorm(false); // skew estimate without the flat-frame correction
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const buf = readFileSync(join(ROOT, process.env.MODEL || "web/kigen.bin")); // MODEL=: another recognizer

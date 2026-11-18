@@ -225,7 +225,7 @@ def rand_text():
         s = f"{random.choice([str(y), yy])}{sep or '.'}{pad(m, p)}"
     elif ksep:    # 2026年/08月/11日, 2026年-08月-11日, R9年.3月.31日, 2026年/08月
         ks = random.choices(["/", "-", "."], [6, 3, 2])[0]
-        ys = random.choice([str(y), str(y), yy, f"R{random.randint(1, 16)}", f"令和{random.randint(1, 16)}"])
+        ys = random.choice([str(y), str(y), yy, f"R{random.randint(1, 16)}", f"令和{pad(random.randint(1, 16), p)}"])
         s = f"{ys}年{ks}{pad(m, p)}月" + ("" if random.random() < 0.15 else f"{ks}{pad(d, p)}日")
     elif k == 3:  # 2025年12月31日 / 2028年02月 (beverages: year-month, often with a lot code after)
         s = f"{random.choice([str(y), yy])}年{pad(m, p)}月" + ("" if random.random() < 0.3 else f"{pad(d, p)}日")
@@ -256,7 +256,7 @@ def rand_text():
     elif k == 6:  # 令和7年12月31日
         e = random.choices(["令和", "平成", "昭和", "令", "平", "昭"], [10, 3, 0.5, 4, 1.2, 0.2])[0]
         n = random.randint(1, 31)
-        ys = "元" if n == 1 and random.random() < 0.6 else str(n)
+        ys = "元" if n == 1 and random.random() < 0.6 else pad(n, p)  # 令和8年 / 令和08年
         if random.random() < 0.3:  # 令和9.3.31 / 令和09.03.31
             sp = random.choice("../")
             s = f"{e}{pad(n, p)}{sp}{pad(m, p)}" + (f"{sp}{pad(d, p)}" if random.random() < 0.9 else "")
@@ -346,6 +346,18 @@ def norm_label(t):
 def visual_variant(t):
     """What is actually printed: optional spaces after separators, full-width glyphs."""
     import re as _re  # (this function also imports re further down, which makes "re" local)
+    if random.random() < UNITSP_P and _re.search(r"\d[年月日]", t):
+        # "２０２６　年．　１２　月．　３１日" / "2026 年. 12 月. 31 日": a space before the unit and
+        # after the separator that follows it (none between the unit and the separator)
+        t = _re.sub(r"(令和|平成|昭和)(?=\d)", lambda q: q.group(1) + (" " if random.random() < 0.6 else ""), t)  # 令和　０８　年
+        t = _re.sub(r"(\d)([年月日])", lambda q: q.group(1) + (" " if random.random() < 0.8 else "") + q.group(2), t)
+        t = _re.sub(r"([年月])([./\-]?)(?=\d)", lambda q: q.group(1) + q.group(2) + (" " if random.random() < 0.8 else ""), t)
+        r = random.random()
+        if r < 0.6:                                        # full-width with U+3000
+            return "".join(FW.get(c, c) if c != " " else "　" for c in t)
+        if r < 0.8:                                        # full-width digits / letters, half spaces
+            return "".join(FW[c] if c.isascii() and c.isalnum() else c for c in t)
+        return t
     if random.random() < SPACED_P and _re.search(r"\d[./\-]\d|[年月][./\-]", t):
         # "２０２６　／　０８　／　１１" / "２０２６年　／　０８月　／　１１日" / "2026 / 08 / 11"
         t = _re.sub(r"\s*([./\-])\s*", lambda q: " " + q.group(1) + " ", t).strip()
@@ -793,6 +805,7 @@ _TILTEND_ON = os.environ.get("KIGEN_TILTEND", "0") == "1"
 _KSEP_ON = os.environ.get("KIGEN_KSEP", "0") == "1"
 KSEP_P = 0.12 if _KSEP_ON else 0.0      # 年/月/日 lines with a separator after 年 and 月
 SPACED_P = 0.10 if _KSEP_ON else 0.0    # separators spaced on both sides (U+3000 when full-width)
+UNITSP_P = 0.08 if _KSEP_ON else 0.0    # a space before 年/月/日 and after "年." ("２０２６　年．　１２　月．　３１日")
 TILTEND_P = 0.25 if _TILTEND_ON else 0.0
 END1_P = 0.30 if _TILTEND_ON else 0.0
 ERA_R_P = 0.08 if _TILTEND_ON else 0.0   # extra R-era dates (R vs 2: 令和 abbreviation read as a digit)

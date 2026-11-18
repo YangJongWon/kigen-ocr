@@ -776,8 +776,19 @@ function kth(a, k) {
   return a[k];
 }
 
+// A flat frame (7:1 guide) packs any points into few rows at 0°, so a real 15-45° tilt there
+// scores below 0° and is never straightened. When the plain estimate reads weak, readTurns tries
+// the estimate scored against points spread evenly over the frame (to the power SKEW_NORM_P; at 1
+// glyph columns win near ±90°, at 0.5 30-45° still lose). Synthetic 7:1 frames: 15/30/45° right.
+const SKEW_NORM_P = 0.7;
+let SKEW_RETRY = true;
+// also when the plain estimate reads well (the other estimate differing by 5°+): a confident read
+// may be a line cut by the frame. "prec": the other wins with a more precise date too. 7:1 synthetic
+// 15°: 33% -> 75% right, wrong 12 -> 2; tilted Products-Real 15°: 39% -> 77%
+const SKEW_BOTH = "prec";
+export const setSkewNorm = (v) => { SKEW_RETRY = v; }; // (evaluation: off = the plain estimate only)
 const SKEW_MAX = 90; // line direction is defined modulo 180°; up/down is settled by readRegion
-export function estimateSkew(g, w, h) {
+export function estimateSkew(g, w, h, norm = 0) {
   const mag = new Float32Array(Math.max(0, (w - 2) * (h - 2)));
   let n = 0;
   for (let y = 1; y < h - 1; y++)
@@ -795,13 +806,22 @@ export function estimateSkew(g, w, h) {
       if (m >= th) { px.push(x - cx); py.push(y - cy); }
     }
   const R = Math.ceil(Math.hypot(w, h) / 2) + 1, hist = new Float32Array(2 * R + 1);
+  const gx = [], gy = [], gs = Math.max(1, Math.round(Math.sqrt(w * h / 4000)));
+  if (norm) for (let y = 1; y < h - 1; y += gs) for (let x = 1; x < w - 1; x += gs) { gx.push(x - cx); gy.push(y - cy); }
   const sharp = (deg) => {
     const a = deg * Math.PI / 180, s = Math.sin(a), c = Math.cos(a);
     hist.fill(0);
     for (let k = 0; k < px.length; k++) hist[Math.round(-px[k] * s + py[k] * c) + R]++;
     let q = 0;
     for (let k = 0; k < hist.length; k++) q += hist[k] * hist[k];
-    return q;
+    if (!norm) return q;
+    // against the same number of points spread evenly over the frame: a flat frame (7:1 guide)
+    // packs any points into few rows at 0°, which outscored a real 30° tilt
+    hist.fill(0);
+    for (let k = 0; k < gx.length; k++) hist[Math.round(-gx[k] * s + gy[k] * c) + R]++;
+    let u = 0;
+    for (let k = 0; k < hist.length; k++) u += hist[k] * hist[k];
+    return q / (u * (px.length / gx.length) ** 2) ** norm;
   };
   let best = 0, bq = sharp(0);
   for (let d = -SKEW_MAX; d <= SKEW_MAX; d += 3) { const q = sharp(d); if (q > bq * 1.02) { bq = q; best = d; } }
@@ -812,7 +832,7 @@ export function estimateSkew(g, w, h) {
 
 // Rotate a gray image so that a line at `deg` becomes horizontal (canvas grows, edges replicated;
 // a flat median fill was tried and read slightly worse on tilted product photos).
-function rotateGray(g, w, h, deg) {
+function rotateGray(g, w, h, deg, bg) {
   const a = deg * Math.PI / 180, s = Math.sin(a), c = Math.cos(a);
   const nw = Math.ceil(w * Math.abs(c) + h * Math.abs(s)), nh = Math.ceil(w * Math.abs(s) + h * Math.abs(c));
   const out = new Float32Array(nw * nh), cx = w / 2, cy = h / 2, ncx = nw / 2, ncy = nh / 2;
@@ -820,6 +840,7 @@ function rotateGray(g, w, h, deg) {
     for (let x = 0; x < nw; x++) {
       const u = x - ncx, v = y - ncy;
       let sx = u * c - v * s + cx - 0.5, sy = u * s + v * c + cy - 0.5;
+      if (bg !== undefined && (sx < -0.5 || sx > w - 0.5 || sy < -0.5 || sy > h - 0.5)) { out[y * nw + x] = bg; continue; }
       sx = Math.min(w - 1, Math.max(0, sx)); sy = Math.min(h - 1, Math.max(0, sy));
       const x0 = Math.floor(sx), y0 = Math.floor(sy), x1 = Math.min(w - 1, x0 + 1), y1 = Math.min(h - 1, y0 + 1);
       const fx = sx - x0, fy = sy - y0;
@@ -827,6 +848,81 @@ function rotateGray(g, w, h, deg) {
         + (g[y1 * w + x0] * (1 - fx) + g[y1 * w + x1] * fx) * fy;
     }
   return { g: out, w: nw, h: nh };
+}
+
+// Paper level of a gray frame: the median (most of a frame is background).
+function paperLevel(g) {
+  const k = Math.max(1, Math.floor(g.length / 4000)), a = new Float32Array(Math.ceil(g.length / k));
+  for (let i = 0, j = 0; i < g.length; i += k) a[j++] = g[i];
+  return kth(a, a.length >> 1);
+}
+
+// The read line runs into the frame's border: sample the band again, past the frame, from the
+// camera picture around it (o.around = {img: RGBA, x, y, w, h}: where the frame sits in img, in img
+// pixels; the frame may have been scaled — or a function returning that). Only the ends that touch the border are extended,
+// over ink that continues the line (gaps under EXT_JOIN band heights), at most EXT_LEN band heights.
+// -> {r: read, strip: {g, w, h, valid}} or null (no end at the border)
+function extendBand(model, o, best, g, w, h, toFrame, inside, w0, h0) {
+  // (o.around may be a function: the picture is then only cut when a line does run out)
+  if (typeof o.around === "function") o.around = o.around();
+  const A = o.around;
+  if (!A?.img) return null;
+  const img = A.img, IW = img.width, IH = img.height, D = img.data;
+  const [vy0, vy1] = best.band, [vx0, vx1] = best.cols, bh = vy1 - vy0, n = best.pos.length;
+  if (bh < 4 || !n) return null;
+  const kx = best.input.w * bh / model.h, yc = (vy0 + vy1) / 2, dy = 0.3 * bh, step = Math.max(0.5, bh / 12);
+  const gap = (x0, dir) => {
+    let x = x0;
+    while (Math.abs(x - x0) < o.extGap * bh && inside(x + dir * step, yc - dy) && inside(x + dir * step, yc) && inside(x + dir * step, yc + dy)) x += dir * step;
+    return Math.abs(x - x0) / bh;
+  };
+  // (a character is emitted near its right edge: its left edge is ~a glyph further left)
+  const cutL = gap(Math.max(vx0, vx0 + best.pos[0] * kx - 0.7 * bh), -1) < o.extGap;
+  const cutR = gap(vx0 + best.pos[n - 1] * kx, 1) < o.extGap;
+  if (!cutL && !cutR) return null;
+  const sx0 = Math.floor(vx0 - (cutL ? EXT_LEN * bh : 0)), sx1 = Math.ceil(vx1 + (cutR ? EXT_LEN * bh : 0));
+  const e2 = Math.round(0.15 * bh) + 1, sy0 = vy0 - e2, SW = sx1 - sx0, SH = bh + 2 * e2;
+  const out = new Float32Array(SW * SH), ok = new Uint8Array(SW).fill(1);
+  const kxA = A.w / w0, kyA = A.h / h0, ss = Math.max(1, Math.min(3, Math.round(Math.max(kxA, kyA))));
+  const gray = (i) => 0.299 * D[i] + 0.587 * D[i + 1] + 0.114 * D[i + 2];
+  const vals = [];
+  for (let y = 0; y < SH; y++)
+    for (let x = 0; x < SW; x++) {
+      let acc = 0, inb = true;
+      for (let b = 0; b < ss && inb; b++)
+        for (let a = 0; a < ss; a++) {
+          const [fx, fy] = toFrame(sx0 + x + (a + 0.5) / ss - 0.5, sy0 + y + (b + 0.5) / ss - 0.5);
+          const ax = A.x + (fx + 0.5) * kxA - 0.5, ay = A.y + (fy + 0.5) * kyA - 0.5;
+          if (ax < 0 || ay < 0 || ax > IW - 1 || ay > IH - 1) { inb = false; break; }
+          const x0 = Math.floor(ax), y0 = Math.floor(ay), x1 = Math.min(IW - 1, x0 + 1), y1 = Math.min(IH - 1, y0 + 1);
+          const tx = ax - x0, ty = ay - y0;
+          acc += (gray((y0 * IW + x0) * 4) * (1 - tx) + gray((y0 * IW + x1) * 4) * tx) * (1 - ty)
+            + (gray((y1 * IW + x0) * 4) * (1 - tx) + gray((y1 * IW + x1) * 4) * tx) * ty;
+        }
+      if (!inb) { out[y * SW + x] = NaN; ok[x] = 0; continue; }
+      const v = acc / (ss * ss);
+      out[y * SW + x] = v;
+      if (((x + y) & 7) === 0) vals.push(v);
+    }
+  const bg = vals.length ? kth(Float32Array.from(vals), vals.length >> 1) : 128;
+  for (let i = 0; i < out.length; i++) if (out[i] !== out[i]) out[i] = bg; // NaN: beyond the picture
+  // the line's ink in the strip: what the read covered, then neighbouring clusters along it
+  const c0 = vx0 - sx0, c1 = vx1 - sx0, cl = inkClusters(out, SW, e2, e2 + bh, 0, SW);
+  let ia = Infinity, ib = -Infinity;
+  for (const [a, b] of cl) if (b > c0 && a < c1) { ia = Math.min(ia, a); ib = Math.max(ib, b); }
+  if (!(ib > ia)) return null;
+  for (const [a, b] of cl) if (cutR && a >= ib && a - ib < o.extJoin * bh) ib = b;
+  for (let k = cl.length - 1; k >= 0; k--) if (cutL && cl[k][1] <= ia && ia - cl[k][1] < o.extJoin * bh) ia = cl[k][0];
+  const L = Math.max(0, Math.floor(ia - 0.5 * bh)), R = Math.min(SW, Math.ceil(ib + 0.5 * bh));
+  if (R - L < bh) return null;
+  const inp = toInput(crop(out, SW, e2, e2 + bh, L, R), R - L, bh, model);
+  const r = recognize(model, inp.x, inp.w);
+  r.date = parseDate(r.text, { strict: o.strict });
+  r.band = [e2, e2 + bh];
+  r.cols = [L, R];
+  r.input = inp;
+  const valid = (X, Y) => X >= 0 && Y >= 0 && X <= SW - 1 && Y <= SH - 1 && ok[Math.round(X)] === 1;
+  return { r, strip: { g: out, w: SW, h: SH, valid } };
 }
 
 // Read a framed region (RGBA ImageData-like). Straightens tilted text first (any angle),
@@ -845,7 +941,8 @@ const weak = (r) => !r.date || r.date.order === "MD" || r.conf < 0.6;
 // A dropped date is kept in `rejected` ({date, reason}) so the UI can ask for a retake.
 export function readRegion(model, img, opts = {}) {
   const o = { strict: opts.strict ?? true, minConf: opts.minConf ?? MIN_CONF, focus: opts.focus, strips: opts.strips,
-    det: opts.det, detConf: opts.detConf, detCentre: opts.detCentre, detWiden: opts.detWiden, bigMode: opts.bigMode };
+    det: opts.det, detConf: opts.detConf, detCentre: opts.detCentre, detWiden: opts.detWiden, bigMode: opts.bigMode,
+    skewBoth: opts.skewBoth, around: opts.around, fill: opts.fill ?? FILL, extGap: opts.extGap ?? EXT_GAP, extJoin: opts.extJoin ?? EXT_JOIN };
   const best = readTurns(model, img, o);
   best.dateConf = best.date ? dateConf(best.text, best.probs, best.date.iso, o.strict) : null;
   // only a manufacturing date was found: never hand it out as the expiry
@@ -873,6 +970,12 @@ export function readRegion(model, img, opts = {}) {
     && best.date?.precision === "month" && best.date.order !== "MY" && best.edgeGap < (opts.edgeGap ?? EDGE_GAP);
   if (o.strict && best.date && cut) {
     best.rejected = { date: best.date, reason: "edge" };
+    best.date = null;
+  }
+  // the line ran out of the frame and, seen in full from the picture around it, does not give
+  // this date (a glyph cut at the border: "10.01.21" -> "10.01.27")
+  if (o.strict && best.date && best.extConflict !== undefined) {
+    best.rejected = { date: best.date, reason: "cut", full: best.extConflict };
     best.date = null;
   }
   // a digit misread with high confidence ("10.08" -> "10.03") rarely survives a second look
@@ -933,6 +1036,11 @@ const DEKAD_MARGIN = 0.9;
 // frame's border, with ink there (contrast >= EDGE_INK of the date's own), is not handed out:
 // a dekad mark may have been cut off
 const EDGE_GAP = 2.0, EDGE_INK = 0.35;
+// opts.around: an end of the read line closer than EXT_GAP band heights to the frame's border is
+// followed past it, over ink gaps under EXT_JOIN, at most EXT_LEN band heights
+const EXT_GAP = 3, EXT_JOIN = 1.6, EXT_LEN = 6, EXT_MIN_SKEW = 8;
+// straightening fill: false = edge pixels repeated, true = paper level (opts.fill)
+const FILL = false;
 // second look on by default: on ExpDate photos it cut wrong dates 4.1% -> 1.2% for 1.8% fewer
 // right ones. In camera mode a missed frame is cheap (the next frame retries), a wrong date is not.
 const RECHECK = true;
@@ -943,10 +1051,22 @@ const FOCUS_PAD = [0.5, 1.0];
 
 function readTurns(model, img, o) {
   const g = toGray(img), w = img.width, h = img.height;
-  const skew = estimateSkew(g, w, h);
-  const first = readGray(model, g, w, h, skew, o);
-  if (!weak(first)) return first;
-  let best = first;
+  let skew = estimateSkew(g, w, h);
+  let best = readGray(model, g, w, h, skew, o);
+  const both = o.skewBoth ?? SKEW_BOTH;
+  if (!weak(best) && !both) return best;
+  if (SKEW_RETRY) {
+    const s2 = estimateSkew(g, w, h, SKEW_NORM_P);
+    const d = Math.abs(((s2 - skew) % 180 + 270) % 180 - 90); // (modulo 180°)
+    if (d >= 5) {
+      const alt = readGray(model, g, w, h, s2, o);
+      const P = { day: 3, dekad: 2, month: 1 }, pr = (r) => P[r.date?.precision] ?? 0;
+      // (both: a confident read at the plain estimate may be a cut-off line, "2030.01.11" ->
+      // "2030.01"; the other estimate wins with a more precise date)
+      if (!weak(alt) ? (weak(best) || alt.score > best.score || (both === "prec" && pr(alt) > pr(best))) : alt.date && !best.date) { best = alt; skew = s2; }
+    }
+  }
+  if (!weak(best)) return best;
   // the line direction is only known modulo 180°: try the other way up, then (tall box) ±90°.
   // Turns are taken relative to the estimated skew — re-estimating on a turned image can land
   // on the same upside-down solution again (+90° and -90° look alike).
@@ -963,7 +1083,8 @@ function readTurns(model, img, o) {
 function readGray(model, g, w, h, angle, o) {
   const skew = ((angle % 360) + 540) % 360 - 180; // -> [-180, 180)
   const w0 = w, h0 = h, g0 = g; // frame before straightening
-  if (Math.abs(skew) >= 3) ({ g, w, h } = rotateGray(g, w, h, skew));
+  const rotated = Math.abs(skew) >= 3;
+  if (rotated) ({ g, w, h } = rotateGray(g, w, h, skew, o.fill ? paperLevel(g) : undefined));
   const lines = textLines(g, w, h);
   const cands = [[0, h]];
   const [b0, b1] = textBand(g, w, h);
@@ -1114,14 +1235,53 @@ function readGray(model, g, w, h, angle, o) {
   if (detBox) best.detBox = detBox; // the detector's box (straightened image) and score
   best.skew = skew;
   best.turn = 0;
+  // canvas (straightened) -> frame pixel coordinates (rotateGray's mapping), and whether a canvas
+  // point shows the frame itself rather than straightening fill
+  const an = skew * Math.PI / 180, ca = Math.cos(an), sa = Math.sin(an);
+  const toFrame = (X, Y) => rotated ? [(X - w / 2) * ca - (Y - h / 2) * sa + w0 / 2 - 0.5, (X - w / 2) * sa + (Y - h / 2) * ca + h0 / 2 - 0.5] : [X, Y];
+  const inside = (X, Y) => {
+    if (X < 0 || X > w - 1 || Y < 0 || Y > h - 1) return false;
+    const [fx, fy] = toFrame(X, Y);
+    return fx >= -0.5 && fx <= w0 - 0.5 && fy >= -0.5 && fy <= h0 - 0.5;
+  };
+  // the source the chosen read's band / columns refer to: the canvas, or (beyond the frame) a strip
+  let G = g, GW = w, GH = h, valid = inside;
+  // The line runs out of the frame (a tilted label in a flat guide: its ends cross the guide's top /
+  // bottom edge, "R9.3.31" -> "R9.3.3", "R8.1.31" -> "28.1.31"). With the camera picture around the
+  // frame (opts.around), follow the band past the frame there and read it again.
+  // (only on a frame straightened by EXT_MIN_SKEW or more: near 0° a date touching the guide's side
+  // read right and the longer stretch beside it cost right dates)
+  const tilt = Math.abs(((skew % 180) + 270) % 180 - 90);
+  if (o.around && tilt >= EXT_MIN_SKEW && best.pos && /\d/.test(best.text)) {
+    const ext = extendBand(model, o, best, g, w, h, toFrame, inside, w0, h0);
+    if (ext) {
+      const { r, strip } = ext;
+      r.score = r.conf + (r.date ? 0.5 : 0);
+      // judged on the date's own characters: the longer stretch often picks up other text
+      // beside the date ("BB0月15日10.01.21")
+      const dc = r.date ? dateConf(r.text, r.probs, r.date.iso, o.strict) ?? 0 : 0;
+      const P = { day: 3, dekad: 2, month: 1 }, pr = (d) => P[d?.precision] ?? 0;
+      const span = (t, d) => { const sp = d && findDate([...t], d.iso, o.strict, d); return sp ? sp[1] - sp[0] : 0; };
+      if (r.date && sameDate(r.date, best.date)) best.extendedSame = true;
+      else if (r.date && dc >= (o.minConf ?? MIN_CONF) && (!best.date || pr(r.date) > pr(best.date)
+          || (pr(r.date) === pr(best.date) && span(r.text, r.date) > span(best.text, best.date)))) {
+        // more of the line came in: "R9.3.3" -> "R9.3.31", "2030.01" -> "2030.01.11"
+        reads.push(r);
+        best = { ...best, ...r, extended: true, was: best.text };
+        ({ g: G, w: GW, h: GH, valid } = strip);
+      } else if (best.date && !findDate([...r.text], best.date.iso, o.strict, best.date))
+        // the line seen in full does not hold the date read from the cut one: not handed out
+        best.extConflict = r.text;
+    }
+  }
   // second look at the chosen line with slightly different vertical framing (for readRegion)
   // (taller framing; rows beyond the image are edge rows repeated — shrinking cut glyphs)
   const [vy0, vy1] = best.band, [vx0, vx1] = best.cols, e = Math.max(1, Math.round((vy1 - vy0) * 0.12));
   best.recheck = () => {
     const cw = vx1 - vx0, nh = vy1 - vy0 + 2 * e, buf = new Float32Array(cw * nh);
     for (let y = 0; y < nh; y++) {
-      const sy = Math.min(h - 1, Math.max(0, vy0 - e + y));
-      buf.set(g.subarray(sy * w + vx0, sy * w + vx1), y * cw);
+      const sy = Math.min(GH - 1, Math.max(0, vy0 - e + y));
+      buf.set(G.subarray(sy * GW + vx0, sy * GW + vx1), y * cw);
     }
     const inp = toInput(buf, cw, nh, model);
     return recognize(model, inp.x, inp.w).text;
@@ -1138,28 +1298,21 @@ function readGray(model, g, w, h, angle, o) {
     if (sp) {
       const bh = vy1 - vy0, kx = best.input.w * bh / model.h;
       const xr = vx0 + best.pos[sp[1] - 1] * kx, yc = (vy0 + vy1) / 2;
-      const rot = w !== w0 || h !== h0, an = skew * Math.PI / 180, ca = Math.cos(an), sa = Math.sin(an);
-      const inside = (X, Y) => {
-        if (X < 0 || X > w - 1 || Y < 0 || Y > h - 1) return false;
-        if (!rot) return true;
-        const ox = (X - w / 2) * ca - (Y - h / 2) * sa + w0 / 2, oy = (X - w / 2) * sa + (Y - h / 2) * ca + h0 / 2;
-        return ox >= 0 && ox <= w0 - 1 && oy >= 0 && oy <= h0 - 1;
-      };
       const dy = 0.3 * bh, step = Math.max(0.5, bh / 12);
       let xb = xr;
-      while (inside(xb + step, yc - dy) && inside(xb + step, yc) && inside(xb + step, yc + dy)) xb += step;
+      while (valid(xb + step, yc - dy) && valid(xb + step, yc) && valid(xb + step, yc + dy) && xb - xr < 50 * bh) xb += step;
       best.edgeGap = (xb - xr) / bh;
-      const ya = Math.max(0, Math.round(yc - dy)), yb = Math.min(h, Math.round(yc + dy) + 1);
-      const ea = Math.max(0, Math.floor(xb - Math.max(2, 0.15 * bh))), eb = Math.min(w, Math.ceil(xb) + 1);
+      const ya = Math.max(0, Math.round(yc - dy)), yb = Math.min(GH, Math.round(yc + dy) + 1);
+      const ea = Math.max(0, Math.floor(xb - Math.max(2, 0.15 * bh))), eb = Math.min(GW, Math.ceil(xb) + 1);
       let elo = Infinity, ehi = -Infinity, blo = Infinity, bhi = -Infinity;
       for (let y = ya; y < yb; y++) {
-        for (let x = Math.max(0, Math.floor(vx0)); x < Math.min(w, Math.ceil(xr)); x++) {
-          const v = g[y * w + x];
+        for (let x = Math.max(0, Math.floor(vx0)); x < Math.min(GW, Math.ceil(xr)); x++) {
+          const v = G[y * GW + x];
           if (v < blo) blo = v; if (v > bhi) bhi = v;
         }
         for (let x = ea; x < eb; x++) {
-          if (!inside(x, y)) continue;
-          const v = g[y * w + x];
+          if (!valid(x, y)) continue;
+          const v = G[y * GW + x];
           if (v < elo) elo = v; if (v > ehi) ehi = v;
         }
       }

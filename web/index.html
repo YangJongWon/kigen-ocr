@@ -88,18 +88,19 @@ function grab(src, sw, sh, box) { // box in source pixels
   return ctx.getImageData(0, 0, c.width, c.height);
 }
 
-function run(img) {
+function run(img, around) {
   const t = performance.now();
   // the second look (recheck) stays on in camera mode too: a rejected frame no longer resets the
   // streak (scanLoop), and recheck halves wrong dates (7:1 guide: 4.0% -> 2.0%), including
   // misreads that repeat every frame, which the streak alone cannot catch
-  const r = readRegion(model, img);
+  const r = readRegion(model, img, around ? { around } : {});
   const ms = performance.now() - t;
   drawDebug(r);
   return [r, ms];
 }
 
-// The camera frame is ~7:1, so a line tilted more than ~6° no longer fits in it.
+// The camera frame is ~7:1, so a line tilted more than ~6° no longer fits in it (readRegion
+// follows it past the frame with the picture around it, but a level label still reads best).
 const HINT_CAM = "日付を枠に合わせてください";
 function tiltHint(r) {
   if (mode !== "cam") return;
@@ -121,7 +122,20 @@ async function scanLoop() {
   if (video.readyState >= 2) {
     const vw = video.videoWidth, vh = video.videoHeight, k = vw / $("stage").clientWidth;
     const gx = guide.offsetLeft * k, gy = guide.offsetTop * k, gw = guide.offsetWidth * k, gh = guide.offsetHeight * k;
-    const [r, ms] = run(grab(video, vw, vh, { x: gx, y: gy, w: gw, h: gh }));
+    const img = grab(video, vw, vh, { x: gx, y: gy, w: gw, h: gh });
+    // a tilted label's line runs out of the flat guide: the picture around it, at the guide's
+    // scale, cut only when readRegion needs it
+    const around = () => {
+      const m = gw * 0.5, ax = Math.max(0, gx - m), ay = Math.max(0, gy - m);
+      const aw = Math.min(vw, gx + gw + m) - ax, ah = Math.min(vh, gy + gh + m) - ay, s = img.height / gh;
+      const c = document.createElement("canvas");
+      c.width = Math.max(8, Math.round(aw * s)); c.height = Math.max(8, Math.round(ah * s));
+      const ctx = c.getContext("2d", { willReadFrequently: true });
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(video, ax, ay, aw, ah, 0, 0, c.width, c.height);
+      return { img: ctx.getImageData(0, 0, c.width, c.height), x: (gx - ax) * s, y: (gy - ay) * s, w: img.width, h: img.height };
+    };
+    const [r, ms] = run(img, around);
     tiltHint(r);
     // only a different date restarts the streak; a frame without a date (blur, rejected read)
     // just doesn't count. 5 misses in a row (~1s) means the label is gone: reset.
