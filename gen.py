@@ -42,7 +42,9 @@ KR_FONTS = [(FD + f, i) for f, i in [
     ("malgun.ttf", 0), ("malgunbd.ttf", 0), ("gulim.ttc", 0), ("batang.ttc", 0),
     ("NotoSansKR-VF.ttf", 0), ("H2GTRM.TTF", 0)]]
 SC_FONTS = [(FD + f, i) for f, i in [("msyh.ttc", 0), ("msyhbd.ttc", 0), ("simsun.ttc", 0)]]
-TC_FONTS = [(FD + f, i) for f, i in [("msjh.ttc", 0), ("mingliub.ttc", 0)]]
+# (mingliub.ttc is MingLiU-ExtB: Extension B only, common hanzi came out as boxes under labels
+# like 有效日期; replaced by the other JhengHei weights)
+TC_FONTS = [(FD + f, i) for f, i in [("msjh.ttc", 0), ("msjhbd.ttc", 0), ("msjhl.ttc", 0)]]
 TH_FONTS = [(FD + f, 0) for f in ["leelawui.ttf", "tahoma.ttf"]]
 
 
@@ -198,7 +200,8 @@ def rand_text():
     if conf:  # 0 <-> 2 and 2 <-> 7 neighbours: 07/27, 02/20/22, 2020/2022/2027
         y = random.choice([2020, 2022, 2027, 2026, 2028, 2029, 2025, y])
         m = random.choice([7, 2, 10, 12, 1, 11, m])
-        d = random.choice([7, 27, 2, 20, 22, 17, 12, 10, 30, 28, 29, d])
+        d = random.choice([7, 27, 2, 20, 22, 17, 12, 10, 30, 28, 29, 5, 15, 25, d])  # (5 <-> 0: "１５" read "１０")
+        m = random.choice([m, m, 5])
     if random.random() < END1_P:  # …01 / …11 / …21 / …31, year-months ending in 1 / 11
         d = random.choice([1, 11, 21, 31])
         m = random.choice([1, 11, m])
@@ -209,6 +212,10 @@ def rand_text():
     k = random.choices(range(11), [22, 22, 6, 9, 5, 9, 4, 3, 1.5, 9, 7])[0]
     if random.random() < DEKAD_P:
         k = 4
+    ksep = random.random() < KSEP_P
+    era_r = random.random() < ERA_R_P
+    if era_r:
+        k = 5
     yy = pad(y % 100, True)
     if k == 0:    # 2025.12.31
         s = f"{y}{sep}{pad(m, p)}{sep}{pad(d, p)}"
@@ -216,6 +223,10 @@ def rand_text():
         s = f"{yy}{sep}{pad(m, p)}{sep}{pad(d, p)}"
     elif k == 2:  # 2026.03 / 26.3
         s = f"{random.choice([str(y), yy])}{sep or '.'}{pad(m, p)}"
+    elif ksep:    # 2026年/08月/11日, 2026年-08月-11日, R9年.3月.31日, 2026年/08月
+        ks = random.choices(["/", "-", "."], [6, 3, 2])[0]
+        ys = random.choice([str(y), str(y), yy, f"R{random.randint(1, 16)}", f"令和{random.randint(1, 16)}"])
+        s = f"{ys}年{ks}{pad(m, p)}月" + ("" if random.random() < 0.15 else f"{ks}{pad(d, p)}日")
     elif k == 3:  # 2025年12月31日 / 2028年02月 (beverages: year-month, often with a lot code after)
         s = f"{random.choice([str(y), yy])}年{pad(m, p)}月" + ("" if random.random() < 0.3 else f"{pad(d, p)}日")
     elif k == 4:  # 2026年3月 (上旬) / 2026.03末 / 26年3月初旬 / R8.3 下旬
@@ -237,7 +248,7 @@ def rand_text():
                  "中旬": ["中旬", "上旬", "下旬"], "中": ["中", "末", "初"]}[q.group(1)]), s)
     elif k == 5:  # R7.12.31  H31.4.30  S / one-kanji 令7.12.31 平31.4.30 昭64.1.7
         e, base = random.choices([("R", 2018), ("H", 1988), ("S", 1925), ("令", 2018), ("平", 1988), ("昭", 1925)],
-                                 [10, 2, 0.3, 5, 1.5, 0.3])[0]
+                                 [10, 2, 0.3, 5, 1.5, 0.3])[0] if not era_r else ("R", 2018)
         n = random.randint(1, 31 if e != "S" else 64)
         s = f"{e}{pad(n, random.random() < 0.3)}{sep if sep not in ('', ' ') else '.'}{pad(m, p)}"
         if random.random() < 0.85:
@@ -334,6 +345,16 @@ def norm_label(t):
 
 def visual_variant(t):
     """What is actually printed: optional spaces after separators, full-width glyphs."""
+    import re as _re  # (this function also imports re further down, which makes "re" local)
+    if random.random() < SPACED_P and _re.search(r"\d[./\-]\d|[年月][./\-]", t):
+        # "２０２６　／　０８　／　１１" / "２０２６年　／　０８月　／　１１日" / "2026 / 08 / 11"
+        t = _re.sub(r"\s*([./\-])\s*", lambda q: " " + q.group(1) + " ", t).strip()
+        r = random.random()
+        if r < 0.6:
+            return "".join(FW.get(c, c) for c in t)       # full-width, U+3000 around the separators
+        if r < 0.8:                                        # full-width digits only
+            return "".join(FW[c] if c.isascii() and c.isalnum() else c for c in t)
+        return t
     if random.random() < 0.25:  # "R8. 11. 16" / "2026 / 8 / 13" / "2026年 8月 13日"
         both = random.random() < 0.3
         out = ""
@@ -766,8 +787,15 @@ TOUCH_P = 0.15 if _EDGE_ON else 0.0  # per side: a whole end glyph touching the 
 # A slanted edge at the end in the margin, grazing, or through the end glyph with 60-90% of it left;
 # the label always keeps the glyph (no "drop it" samples). Dates ending in 1 more often.
 _TILTEND_ON = os.environ.get("KIGEN_TILTEND", "0") == "1"
+# 年 / 月 followed by a separator ("２０２６年　／　０８月　／　１１日", "2026年-08月-11日") and
+# separators with spaces on both sides ("２０２６　／　０８　／　１１"): the shipped model read "月－"
+# as the lot-code "+" and dropped endings. KIGEN_KSEP=1
+_KSEP_ON = os.environ.get("KIGEN_KSEP", "0") == "1"
+KSEP_P = 0.12 if _KSEP_ON else 0.0      # 年/月/日 lines with a separator after 年 and 月
+SPACED_P = 0.10 if _KSEP_ON else 0.0    # separators spaced on both sides (U+3000 when full-width)
 TILTEND_P = 0.25 if _TILTEND_ON else 0.0
 END1_P = 0.30 if _TILTEND_ON else 0.0
+ERA_R_P = 0.08 if _TILTEND_ON else 0.0   # extra R-era dates (R vs 2: 令和 abbreviation read as a digit)
 
 
 def glyph_runs(a, th):
@@ -926,10 +954,12 @@ def edge_plan(vis, t):
     """Pick a frame edge for this line (or None): a cut needs a digit / Latin letter at that end,
     the same glyph on screen and in the label."""
     import unicodedata
-    if random.random() < TILTEND_P:  # tilted label: the end crosses the guide's top / bottom edge
-        side = "R" if random.random() < 0.85 else "L"
+    if random.random() < TILTEND_P:  # tilted label: an end crosses the guide's top / bottom edge
+        # labels tilted 15-60° (the edge then runs 30-75° from vertical); the start too: streaks on
+        # the era letter turned "R8.1.31" into "28.1.31"
+        side = "R" if random.random() < 0.6 else "L"
         k = random.random()
-        return {"side": side, "cut": False, "partial": k < 0.35, "phi": (30, 60)}
+        return {"side": side, "cut": False, "partial": k < 0.35, "phi": (30, 75)}
     r = random.random()
     if r >= CUT_P + EDGE_P:
         return None
