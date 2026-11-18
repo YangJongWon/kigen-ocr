@@ -865,10 +865,13 @@ export function readRegion(model, img, opts = {}) {
     best.rejected = { date: best.date, reason: "dekad" };
     best.date = null;
   }
-  // a year-month ending at the frame's right edge: a cut-off dekad mark (初 / 上旬) would make it
-  // run 20 days too long. Only when the month comes last (a mark never follows "02.2023")
-  if (o.strict && best.date?.precision === "month" && best.date.order !== "MY" && best.edgeGap < (opts.edgeGap ?? EDGE_GAP)
-      && best.edgeInk >= (opts.edgeInk ?? EDGE_INK)) {
+  // a year-month (month last: a dekad mark never follows "02.2023") whose line runs into the
+  // frame's border with ink there: a cut-off 初 / 上旬 would make it run to the month's end
+  // (any date on a tilted frame was tried as well: of the dates it stopped there, ~80% were right —
+  // where the line meets the border says little about whether its last glyph was read right)
+  const cut = best.edgeInk >= (opts.edgeInk ?? EDGE_INK)
+    && best.date?.precision === "month" && best.date.order !== "MY" && best.edgeGap < (opts.edgeGap ?? EDGE_GAP);
+  if (o.strict && best.date && cut) {
     best.rejected = { date: best.date, reason: "edge" };
     best.date = null;
   }
@@ -926,8 +929,8 @@ const MIN_CONF = 0.8;
 // 初 vs 末 probability gap below which a dekad date is not handed out (synthetic dekad lines:
 // 初<->末 swaps 22 -> 1 for 4.5% fewer right dekad reads)
 const DEKAD_MARGIN = 0.9;
-// a year-month whose last character is closer than this (band heights) to the frame's right edge,
-// with ink running into that edge (contrast there >= EDGE_INK of the band's), is not handed out:
+// a year-month whose last character is closer than this (band heights, along the band) to the
+// frame's border, with ink there (contrast >= EDGE_INK of the date's own), is not handed out:
 // a dekad mark may have been cut off
 const EDGE_GAP = 2.0, EDGE_INK = 0.35;
 // second look on by default: on ExpDate photos it cut wrong dates 4.1% -> 1.2% for 1.8% fewer
@@ -1123,36 +1126,44 @@ function readGray(model, g, w, h, angle, o) {
     const inp = toInput(buf, cw, nh, model);
     return recognize(model, inp.x, inp.w).text;
   };
-  // room between the date's last character and the frame's right edge, in band heights, measured
-  // in the frame as it came in (the straightened canvas is mapped back). A dekad mark cut off
-  // there ("2028.07初" -> "2028.07") leaves a plain year-month that runs to the month's end.
+  // Where the date line runs into the frame's border. Followed along the band in the straightened
+  // canvas from the date's last character until the band leaves the frame as it came in (the right
+  // edge; on a tilted label often the top or bottom edge, where straightening fills streaks), in
+  // band heights; and how much ink sits in the band just before that point, against the date's own
+  // contrast. A cut-off last glyph shows as ink there ("2028.07初" -> "2028.07", the month's end).
+  // Lines above / below the date stay out of it (they are other rows of the straightened canvas;
+  // the frame's last columns as a whole picked them up on tilted labels: "BB 2026.02" stopped).
   if (best.date && best.pos) {
     const sp = findDate([...best.text], best.date.iso, o.strict);
     if (sp) {
       const bh = vy1 - vy0, kx = best.input.w * bh / model.h;
       const xr = vx0 + best.pos[sp[1] - 1] * kx, yc = (vy0 + vy1) / 2;
-      let sx = xr;
-      if (w !== w0 || h !== h0) {
-        const a = skew * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);
-        sx = (xr - w / 2) * c - (yc - h / 2) * s + w0 / 2;
-      }
-      best.edgeGap = (w0 - sx) / bh;
-      // ink running into the frame's right edge at the date's height: contrast in the last two
-      // columns against the contrast along the band
-      let sy = yc;
-      if (w !== w0 || h !== h0) {
-        const a = skew * Math.PI / 180;
-        sy = (xr - w / 2) * Math.sin(a) + (yc - h / 2) * Math.cos(a) + h0 / 2;
-      }
-      const r0 = Math.max(0, Math.round(sy - 0.4 * bh)), r1 = Math.min(h0, Math.round(sy + 0.4 * bh));
+      const rot = w !== w0 || h !== h0, an = skew * Math.PI / 180, ca = Math.cos(an), sa = Math.sin(an);
+      const inside = (X, Y) => {
+        if (X < 0 || X > w - 1 || Y < 0 || Y > h - 1) return false;
+        if (!rot) return true;
+        const ox = (X - w / 2) * ca - (Y - h / 2) * sa + w0 / 2, oy = (X - w / 2) * sa + (Y - h / 2) * ca + h0 / 2;
+        return ox >= 0 && ox <= w0 - 1 && oy >= 0 && oy <= h0 - 1;
+      };
+      const dy = 0.3 * bh, step = Math.max(0.5, bh / 12);
+      let xb = xr;
+      while (inside(xb + step, yc - dy) && inside(xb + step, yc) && inside(xb + step, yc + dy)) xb += step;
+      best.edgeGap = (xb - xr) / bh;
+      const ya = Math.max(0, Math.round(yc - dy)), yb = Math.min(h, Math.round(yc + dy) + 1);
+      const ea = Math.max(0, Math.floor(xb - Math.max(2, 0.15 * bh))), eb = Math.min(w, Math.ceil(xb) + 1);
       let elo = Infinity, ehi = -Infinity, blo = Infinity, bhi = -Infinity;
-      for (let y = r0; y < r1; y++)
-        for (let x = 0; x < w0; x++) {
-          const v = g0[y * w0 + x];
+      for (let y = ya; y < yb; y++) {
+        for (let x = Math.max(0, Math.floor(vx0)); x < Math.min(w, Math.ceil(xr)); x++) {
+          const v = g[y * w + x];
           if (v < blo) blo = v; if (v > bhi) bhi = v;
-          if (x >= w0 - 2) { if (v < elo) elo = v; if (v > ehi) ehi = v; }
         }
-      best.edgeInk = r1 > r0 && bhi > blo ? (ehi - elo) / (bhi - blo) : 0;
+        for (let x = ea; x < eb; x++) {
+          if (!inside(x, y)) continue;
+          const v = g[y * w + x];
+          if (v < elo) elo = v; if (v > ehi) ehi = v;
+        }
+      }
+      best.edgeInk = ehi > elo && bhi > blo ? (ehi - elo) / (bhi - blo) : 0;
     }
   }
   // another read with different framing already gave the same date: a second look for free

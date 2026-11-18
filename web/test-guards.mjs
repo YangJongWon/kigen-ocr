@@ -7,11 +7,12 @@ import jpeg from "jpeg-js";
 import * as K from "./kigen-ocr.js";
 const load = async (f) => { const b = readFileSync(new URL(f, import.meta.url)); return K.loadModel(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength)); };
 const model = await load("./kigen.bin"), det = await load("./kigen-det.bin");
-// [frame, expected latest date or null (not handed out), dates that must never come out]
+// [frame, accepted results (latest date, or null = not handed out), dates that must never come out]
+// A cut frame may still be read right (enough of 初 left); it must never come out as the month's end.
 const cases = [
-  ["sho_cut_meiryo", null, ["2028-07-31"]],
-  ["sho_cut_msgothic", null, ["2028-07-31"]],
-  ["sho_cut_YuGothB", null, ["2028-07-31"]],
+  ["sho_cut_meiryo", [null, "2028-07-10"], ["2028-07-31"]],
+  ["sho_cut_msgothic", [null, "2028-07-10"], ["2028-07-31"]],
+  ["sho_cut_YuGothB", [null, "2028-07-10"], ["2028-07-31"]],
   ["sho_room_msgothic", "2028-07-10"],
   ["sho_touch_msgothic", "2028-07-10"],
   ["jojun_cut_msgothic", "2026-11-10"],
@@ -22,9 +23,9 @@ let bad = 0;
 for (const [f, want, never = []] of cases) {
   const img = jpeg.decode(readFileSync(new URL(`./guard/${f}.jpg`, import.meta.url)), { useTArray: true, formatAsRGBA: true });
   const r = K.readRegion(model, img, { det }), got = r.date ? (r.date.latest ?? r.date.iso) : null;
-  const ok = got === want && !never.includes(got);
+  const ok = (Array.isArray(want) ? want.includes(got) : got === want) && !never.includes(got);
   if (!ok) bad++;
-  console.log(`${ok ? "ok  " : "FAIL"} ${f.padEnd(20)} "${r.text}" -> ${got ?? "-"}${r.rejected ? ` (${r.rejected.reason})` : ""}  want ${want ?? "-"}`);
+  console.log(`${ok ? "ok  " : "FAIL"} ${f.padEnd(20)} "${r.text}" -> ${got ?? "-"}${r.rejected ? ` (${r.rejected.reason})` : ""}  want ${[want].flat().map((v) => v ?? "-").join(" or ")}`);
 }
 // the guards off: the cut frames do come out as the month's end (what the guards are for)
 const img = jpeg.decode(readFileSync(new URL("./guard/sho_cut_msgothic.jpg", import.meta.url)), { useTArray: true, formatAsRGBA: true });

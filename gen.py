@@ -199,6 +199,9 @@ def rand_text():
         y = random.choice([2020, 2022, 2027, 2026, 2028, 2029, 2025, y])
         m = random.choice([7, 2, 10, 12, 1, 11, m])
         d = random.choice([7, 27, 2, 20, 22, 17, 12, 10, 30, 28, 29, d])
+    if random.random() < END1_P:  # …01 / …11 / …21 / …31, year-months ending in 1 / 11
+        d = random.choice([1, 11, 21, 31])
+        m = random.choice([1, 11, m])
     p = random.random() < 0.75
     sep = random.choices([".", "/", "-", " ", ""], [10, 4, 2, 2, 4])[0]
     if sep == "":
@@ -624,7 +627,8 @@ def render(text, style=None, curve=None, edge=None):
     if random.random() < LINES_P:
         cross_lines(img, th)
     if edge is not None and not (edge["cut"] and style == "dot"):
-        out = frame_edge(img, a[:, :, 0], th, edge["side"], edge["cut"])
+        out = frame_edge(img, a[:, :, 0], th, edge["side"], edge["cut"], edge.get("partial", False),
+                         edge.get("phi", (15, 60)))
         if out is not None:
             img, edge["done"] = out, True
     img = img.astype(np.uint8)
@@ -756,6 +760,15 @@ CUT_P = 0.10 if _EDGE_ON else 0.0  # the end glyph mostly cut off (5-45% of its 
 EDGE_P = 0.08 if _EDGE_ON else 0.0  # the edge in the margin or grazing the end glyph (>= 90% left); the label stays
 TOUCH_P = 0.15 if _EDGE_ON else 0.0  # per side: a whole end glyph touching the crop edge (no margin); the label stays
 
+# Tilted labels (KIGEN_TILTEND=1): on a label turned 30-60° the date line's end crosses the guide's
+# top / bottom edge, straightened with streaks beyond it; the shipped model then dropped or changed
+# the last "1" at full confidence ("R9.3.31" -> "R9.3.3", "2026.11" -> "2026.1", "…/01" -> "…/07").
+# A slanted edge at the end in the margin, grazing, or through the end glyph with 60-90% of it left;
+# the label always keeps the glyph (no "drop it" samples). Dates ending in 1 more often.
+_TILTEND_ON = os.environ.get("KIGEN_TILTEND", "0") == "1"
+TILTEND_P = 0.25 if _TILTEND_ON else 0.0
+END1_P = 0.30 if _TILTEND_ON else 0.0
+
 
 def glyph_runs(a, th):
     """Column runs of ink (a: HxW mask 0..1), gaps under 0.06 x th bridged."""
@@ -777,29 +790,31 @@ def glyph_runs(a, th):
     return runs
 
 
-def frame_edge(img, a, th, side, cut):
+def frame_edge(img, a, th, side, cut, partial=False, phi_range=(15, 60)):
     """Slanted frame edge at the left (side "L") or right end, with rotateGray's streaks beyond it.
     cut: through the end glyph, leaving 5-45% of its ink and every other glyph whole; else in the
     margin or grazing the end glyph (>= 90% of it left). Between the two (45-90%) is not taught:
     neither "drop it" nor "read it" is safe there. Returns the new image or None (no room / glyphs touch)."""
     if side == "R":
-        out = frame_edge(img[:, ::-1], a[:, ::-1], th, "L", cut)
+        out = frame_edge(img[:, ::-1], a[:, ::-1], th, "L", cut, partial, phi_range)
         return None if out is None else np.ascontiguousarray(out[:, ::-1])
     h, w = a.shape
     runs = glyph_runs(a, th)
     if len(runs) < 2:
         return None
     (g0, g1), nxt = runs[0], runs[1][0]
-    if cut and not (0.2 * th <= g1 - g0 <= 1.3 * th):
+    if (cut or partial) and not (0.08 * th <= g1 - g0 <= 1.3 * th):
         return None  # touching glyphs: not one character
     ys = np.nonzero(a.max(1) > 0.5)[0]
     ym = (ys.min() + ys.max()) / 2
     Y, X = np.mgrid[0:h, 0:w].astype(np.float32)
     ink0, rest = a[:, g0:g1].sum(), a[:, g1:].sum()
     for _ in range(12):
-        phi = math.radians(random.uniform(15, 60)) * random.choice([-1, 1])
-        graze = not cut and (g0 < 0.15 * th or random.random() < 0.5)
-        if cut:
+        phi = math.radians(random.uniform(*phi_range)) * random.choice([-1, 1])
+        graze = not cut and not partial and (g0 < 0.15 * th or random.random() < 0.5)
+        if partial:
+            xm = g0 + random.uniform(0.05, 0.5) * (g1 - g0)
+        elif cut:
             xm = g0 + random.uniform(0.45, 0.95) * (g1 - g0)
         elif graze:
             xm = g0 + random.uniform(0, 0.2) * (g1 - g0)
@@ -809,7 +824,7 @@ def frame_edge(img, a, th, side, cut):
         kept = a[:, g0:g1][~outside[:, g0:g1]].sum() / max(ink0, 1e-6)
         if a[:, g1:][outside[:, g1:]].sum() > 0.01 * rest or outside.mean() > 0.6 or not outside.any():
             continue
-        if (cut and 0.05 <= kept <= 0.45) or (graze and kept >= 0.9) or (not cut and not graze and kept > 0.99):
+        if (partial and 0.6 <= kept <= 0.9) or (cut and not partial and 0.05 <= kept <= 0.45)                 or (graze and kept >= 0.9) or (not cut and not partial and not graze and kept > 0.99):
             break
     else:
         return None
@@ -911,6 +926,10 @@ def edge_plan(vis, t):
     """Pick a frame edge for this line (or None): a cut needs a digit / Latin letter at that end,
     the same glyph on screen and in the label."""
     import unicodedata
+    if random.random() < TILTEND_P:  # tilted label: the end crosses the guide's top / bottom edge
+        side = "R" if random.random() < 0.85 else "L"
+        k = random.random()
+        return {"side": side, "cut": False, "partial": k < 0.35, "phi": (30, 60)}
     r = random.random()
     if r >= CUT_P + EDGE_P:
         return None
