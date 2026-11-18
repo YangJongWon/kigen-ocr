@@ -354,7 +354,7 @@ def visual_variant(t):
         t = _re.sub(r"([年月])([./\-]?)(?=\d)", lambda q: q.group(1) + q.group(2) + (" " if random.random() < 0.8 else ""), t)
         r = random.random()
         if r < 0.6:                                        # full-width with U+3000
-            return "".join(FW.get(c, c) if c != " " else "　" for c in t)
+            return "".join(FW.get(c, c) if c != " " else "\u3000" for c in t)
         if r < 0.8:                                        # full-width digits / letters, half spaces
             return "".join(FW[c] if c.isascii() and c.isalnum() else c for c in t)
         return t
