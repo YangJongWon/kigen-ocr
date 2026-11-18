@@ -1001,6 +1001,14 @@ export function readRegion(model, img, opts = {}) {
     best.rejected = { date: best.date, reason: "edge" };
     best.date = null;
   }
+  // a year-month followed closely by more glyph-sized ink in its band: the day may have been
+  // dropped ("2022.11.14" -> "2022.11" = the 30th, 16 days late)
+  const af = best.after, pg = opts.partialGap ?? PARTIAL_GAP;
+  if (o.strict && best.date && pg > 0 && af && best.date.precision === "month" && best.date.order !== "MY"
+      && af.gap < pg && af.h >= (opts.partialH ?? PARTIAL_H) && af.w >= (opts.partialW ?? PARTIAL_W)) {
+    best.rejected = { date: best.date, reason: "partial", after: af };
+    best.date = null;
+  }
   // the line ran out of the frame and, seen in full from the picture around it, does not give
   // this date (a glyph cut at the border: "10.01.21" -> "10.01.27")
   if (o.strict && best.date && best.extConflict !== undefined) {
@@ -1067,6 +1075,10 @@ const DEKAD_MARGIN = 0.9;
 const EDGE_GAP = 2.0, EDGE_INK = 0.35;
 // ink thinner than this (band heights) at the border does not count for the edge guard (opts.edgeThin; 0 = off)
 const EDGE_THIN = 0.03;
+// a year-month whose band goes on with ink closer than PARTIAL_GAP band heights after its last
+// character, spanning PARTIAL_H of the band's height, is not handed out (opts.partialGap; 0 = off)
+// (camera bench 13 sets: wrong summed 33.2 -> 31.2, no right date lost on exp-crop or the bench)
+const PARTIAL_GAP = 1.3, PARTIAL_H = 0.5, PARTIAL_W = 0.05;
 // opts.around: an end of the read line closer than EXT_GAP band heights to the frame's border is
 // followed past it, over ink gaps under EXT_JOIN, at most EXT_LEN band heights
 const EXT_GAP = 3, EXT_JOIN = 1.6, EXT_LEN = 6, EXT_MIN_SKEW = 8;
@@ -1355,6 +1367,30 @@ function readGray(model, g, w, h, angle, o) {
         }
       }
       best.edgeInk = ehi > elo && bhi > blo ? (ehi - elo) / (bhi - blo) : 0;
+      // What follows the date in its band: the first ink cluster starting past its last character
+      // (gap in band heights, width, and how much of the band's height its ink spans). A dropped
+      // day leaves glyph-sized ink right there ("2022.11.14" read "2022.11", the month's end).
+      const y0b = Math.max(0, Math.floor(vy0)), y1b = Math.min(GH, Math.ceil(vy1));
+      const xe = Math.min(GW, Math.ceil(xr + 4 * bh));
+      if (y1b - y0b >= 4 && xe - Math.floor(xr) > 2) {
+        const cl = inkClusters(G, GW, y0b, y1b, Math.max(0, Math.floor(xr)), xe);
+        const nx = cl.find(([a]) => a > xr + 0.05 * bh && valid(a, yc));
+        if (nx) {
+          const [a, b] = nx;
+          let mx = 0;
+          const rows = new Float32Array(y1b - y0b);
+          for (let y = y0b; y < y1b; y++) {
+            let e = 0;
+            for (let x = Math.max(1, a); x < b; x++) e += Math.abs(G[y * GW + x] - G[y * GW + x - 1]);
+            rows[y - y0b] = e;
+            if (e > mx) mx = e;
+          }
+          let lo = 0, hi = rows.length - 1;
+          while (lo < hi && rows[lo] < 0.2 * mx) lo++;
+          while (hi > lo && rows[hi] < 0.2 * mx) hi--;
+          best.after = { gap: (a - xr) / bh, w: (b - a) / bh, h: (hi - lo + 1) / (y1b - y0b) };
+        }
+      }
     }
   }
   // another read with different framing already gave the same date: a second look for free

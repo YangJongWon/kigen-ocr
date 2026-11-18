@@ -47,7 +47,7 @@ function scoreSuite(name, items, mode) {
       r = recognize(model, inp.x, inp.w);
       r.date = parseDate(r.text);
     } else {
-      r = readRegion(model, it.img);
+      r = readRegion(model, it.img, JSON.parse(process.env.KOPTS || "{}"));
     }
     const text = r.text || "";
     const gotIso = r.date?.iso || null;

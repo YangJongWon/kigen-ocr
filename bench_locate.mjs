@@ -152,6 +152,24 @@ if (process.env.DET2) {
   }
   process.exit(0);
 }
+// OLDMODEL=path (with DET): frames one recognizer reads wrong and the other does not, per set
+if (process.env.OLDMODEL) {
+  const ob = readFileSync(join(ROOT, process.env.OLDMODEL));
+  const old = await K.loadModel(ob.buffer.slice(ob.byteOffset, ob.byteOffset + ob.byteLength));
+  const only = process.env.SETS ? process.env.SETS.split(",") : null;
+  for (const [name, frames] of Object.entries(sets)) {
+    if (!frames.length || (only && !only.includes(name))) continue;
+    const lines = [];
+    for (const f of frames) {
+      const a = K.readRegion(old, f.img, { det }), b = K.readRegion(model, f.img, { det });
+      const wa = !!a.date && a.date.iso !== f.gt, wb = !!b.date && b.date.iso !== f.gt;
+      if (wa !== wb) lines.push(`   ${wb ? "NEW wrong" : "old wrong"}  ${f.file}  want ${f.gt}  old ${a.date?.iso ?? "-"} "${a.text}"${a.rejected ? ` (${a.rejected.reason})` : ""}  new ${b.date?.iso ?? "-"} "${b.text}"${b.rejected ? ` (${b.rejected.reason})` : ""} after ${JSON.stringify(b.after ?? null)} gap ${b.edgeGap?.toFixed(1)}`);
+    }
+    console.log(`${name}: new-only wrong ${lines.filter((l) => l.includes("NEW")).length}, old-only wrong ${lines.filter((l) => l.includes("old wrong")).length}`);
+    for (const l of lines) console.log(l);
+  }
+  process.exit(0);
+}
 if (process.env.CMP) {
   for (const [name, frames] of Object.entries(sets)) {
     if (!frames.length) continue;
@@ -159,7 +177,7 @@ if (process.env.CMP) {
     // BIGCMP=1: big-print line finders of the rule path side by side (no detector)
     const cols = process.env.BIGCMP === "det" ? [["det bigLines", { det, bigMode: "big" }], ["det downup", { det }]]
       : process.env.BIGCMP ? [["big off", { bigMode: "off" }], ["bigLines", { bigMode: "big" }], ["downup", {}]]
-      : [["strips off", { strips: false }], ["strips", {}], ...(det ? [["det", { det }]] : [])];
+      : [["strips off", { strips: false }], ["strips", {}], ...(det ? [["det", { det, ...JSON.parse(process.env.KOPTS || "{}") }]] : [])]; // KOPTS: extra readRegion options on the det column
     for (const [label, opts] of cols) {
       let right = 0, wrong = 0, t = performance.now();
       for (const f of frames) { const r = K.readRegion(model, f.img, opts); if (r.date) r.date.iso === f.gt ? right++ : wrong++; }
