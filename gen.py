@@ -699,12 +699,43 @@ def rot_roundtrip(img, th, ang=None, small=None):
 # background level. Rendered from a height map (the glyph mask blurred by the bevel) lit from a
 # random direction; raised or sunk, on paperboard grain or brushed metal.
 EMBOSS_W = 1.0   # style weight (print 4, dot 5, faint 1.5)
+# unlabelled dents / scratches on embossed lines (read as "." / "1" otherwise). KIGEN_SCRATCH=1
+SCRATCH_P = float(os.environ.get("KIGEN_SCRATCH_P", 0.5)) if os.environ.get("KIGEN_SCRATCH", "0") == "1" else 0.0
+
+
+def dents(a, th):
+    """Unlabelled dents and scratches on an embossed surface (handling marks), as extra height map.
+    Round dents stay out of the bottom 30% of the text rows, where a real "." sits: a dent the size and
+    place of a period cannot be told from one, and learning to skip those would drop real separators."""
+    h, w = a.shape
+    m = np.zeros((h, w), np.float32)
+    rows, cols = np.where(a.max(1) > 0)[0], np.where(a.max(0) > 0)[0]
+    if not len(rows) or not len(cols):
+        return m
+    t0, t1, c0, c1 = rows[0], rows[-1], cols[0], cols[-1]
+    th_px = max(4, t1 - t0)
+    for _ in range(random.randint(1, 4)):
+        x = random.uniform(c0 - 0.3 * th_px, c1 + 0.3 * th_px)
+        if random.random() < 0.55:  # round-ish dent, irregular
+            y = random.uniform(t0, t0 + 0.7 * th_px)
+            rx, ry = th_px * random.uniform(0.03, 0.10), th_px * random.uniform(0.03, 0.10)
+            cv2.ellipse(m, (int(x), int(y)), (max(1, int(rx)), max(1, int(ry))), random.uniform(0, 180), 0, 360, random.uniform(0.4, 1.0), -1)
+        else:  # scratch: a thin line, any angle, anywhere on the text rows
+            y = random.uniform(t0 - 0.2 * th_px, t1 + 0.2 * th_px)
+            L, ang = th_px * random.uniform(0.2, 1.5), random.uniform(0, math.pi)
+            p0 = (int(x - L / 2 * math.cos(ang)), int(y - L / 2 * math.sin(ang)))
+            p1 = (int(x + L / 2 * math.cos(ang)), int(y + L / 2 * math.sin(ang)))
+            cv2.line(m, p0, p1, random.uniform(0.3, 0.9), max(1, int(th_px * random.uniform(0.015, 0.05))))
+    return m
 
 
 def emboss(bg, a, th):
     h, w = a.shape
     bevel = th * random.uniform(0.03, 0.12)
-    hm = cv2.GaussianBlur(a.astype(np.float32), (0, 0), bevel) * random.choice([1, -1])
+    src = a.astype(np.float32)
+    if random.random() < SCRATCH_P:
+        src = np.maximum(src, dents(a, th) * (src.max() or 1))
+    hm = cv2.GaussianBlur(src, (0, 0), bevel) * random.choice([1, -1])
     gx, gy = cv2.Sobel(hm, cv2.CV_32F, 1, 0), cv2.Sobel(hm, cv2.CV_32F, 0, 1)
     t = random.uniform(0, 2 * math.pi)
     shade = gx * math.cos(t) + gy * math.sin(t)
