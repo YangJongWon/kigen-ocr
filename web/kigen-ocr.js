@@ -281,17 +281,22 @@ export function recognize(model, x, w) {
     const r = v * T;
     for (let t = 0; t < T; t++) if (a[r + t] > bestL[t]) { bestL[t] = a[r + t]; bestV[t] = v; }
   }
-  // 初 vs 末 (dekad start vs month end, 20 days apart): highest probability of each over the
-  // steps where either one wins
-  const iSho = vocab.indexOf("初"), iMatsu = vocab.indexOf("末");
+  // 初 vs 末 (dekad start vs month end, 20 days apart), and the Korean 초 vs 말 and 상(순) vs
+  // 하(순): highest probability of each over the steps where either one wins; the closest pair
   let shomatsu = null;
-  for (let t = 0; t < T; t++) {
-    if (bestV[t] !== iSho && bestV[t] !== iMatsu) continue;
-    let sum = 0;
-    for (let v = 0; v < V; v++) sum += Math.exp(a[v * T + t] - bestL[t]);
-    const p1 = Math.exp(a[iSho * T + t] - bestL[t]) / sum, p2 = Math.exp(a[iMatsu * T + t] - bestL[t]) / sum;
-    shomatsu ??= { sho: 0, matsu: 0 };
-    shomatsu.sho = Math.max(shomatsu.sho, p1); shomatsu.matsu = Math.max(shomatsu.matsu, p2);
+  for (const [c1, c2] of [["初", "末"], ["초", "말"], ["상", "하"]]) {
+    const iSho = vocab.indexOf(c1), iMatsu = vocab.indexOf(c2);
+    if (iSho < 0 || iMatsu < 0) continue;
+    let pair = null;
+    for (let t = 0; t < T; t++) {
+      if (bestV[t] !== iSho && bestV[t] !== iMatsu) continue;
+      let sum = 0;
+      for (let v = 0; v < V; v++) sum += Math.exp(a[v * T + t] - bestL[t]);
+      const p1 = Math.exp(a[iSho * T + t] - bestL[t]) / sum, p2 = Math.exp(a[iMatsu * T + t] - bestL[t]) / sum;
+      pair ??= { sho: 0, matsu: 0 };
+      pair.sho = Math.max(pair.sho, p1); pair.matsu = Math.max(pair.matsu, p2);
+    }
+    if (pair && (!shomatsu || Math.abs(pair.sho - pair.matsu) < Math.abs(shomatsu.sho - shomatsu.matsu))) shomatsu = pair;
   }
   for (let t = 0; t < T; t++) {
     const best = bestV[t], bv = bestL[t];
@@ -986,7 +991,7 @@ export function readRegion(model, img, opts = {}) {
   // 初 or 末 (the 1st-10th or the month's end) not clearly told apart: blurred small print fills
   // the space inside 刀 that tells them apart, and taking 初 for 末 moves the expiry 20 days later
   const sm = best.shomatsu;
-  if (o.strict && best.date?.precision === "dekad" && sm && /[初末]/.test(best.text)
+  if (o.strict && best.date?.precision === "dekad" && sm && /[初末초말상하]/.test(best.text)
       && Math.abs(sm.sho - sm.matsu) < (opts.dekadMargin ?? DEKAD_MARGIN)) {
     best.rejected = { date: best.date, reason: "dekad" };
     best.date = null;
@@ -1485,6 +1490,11 @@ export function parseDate(text, opts = {}) {
   let s = kanjiToDigits(text.normalize("NFKC")).replace(/元年/g, "1年")
     // Korean 2026년 3월 31일까지 / Chinese 至 2026年… : same structure as 年月日
     .replace(/(\d)\s*년/g, "$1年").replace(/(\d)\s*월/g, "$1月").replace(/(\d)\s*일/g, "$1日")
+    // Korean 10-day parts -> the Japanese marks: 상순/초순/월초 = 上旬, 중순 = 中旬, 하순 = 下旬,
+    // 월말/말일/말 = 末, 초 = 初 (a bare 초 / 말 / 중 counts only where a bare 初 / 末 / 中 would)
+    .replace(/상순|초순/g, "上旬").replace(/중순/g, "中旬").replace(/하순/g, "下旬")
+    .replace(/월말|말일/g, "月末").replace(/월초/g, "月初")
+    .replace(/(?<=[\d月.\/\-\s])말(?=$|\s|까)/g, "末").replace(/(?<=[\d月.\/\-\s])초(?=$|\s|까)/g, "初")
     .replace(/까지|迄|至/g, " ")
     .replace(/\s*([.\/\-:年月])\s*/g, "$1")          // "R8. 11. 16" -> "R8.11.16"
     .replace(/([年月])[.\/\-]+(?=\d)/g, "$1")        // "２０２６年　／　０８月　／　１１日" -> "2026年08月11日"

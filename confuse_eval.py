@@ -87,8 +87,9 @@ def main():
     gen.ML_P = 0.0
     sets = {k: lines(k, a.n, 70 + i) for i, k in enumerate(("r2", "fw50", "end1"))}
     for ck in a.ckpts:
-        m = train.Net()
-        m.load_state_dict(torch.load(ck, map_location="cpu"))
+        sd = torch.load(ck, map_location="cpu")  # (older checkpoints: fewer output characters, same order)
+        m = train.Net(n=sd["fc.weight"].shape[0])
+        m.load_state_dict(sd)
         m.eval()
         res = []
         for kind, data in sets.items():

@@ -20,7 +20,9 @@ CHARS = (" 0123456789〇一二三四五六七八九十年月日上中下旬初�
          "保质質有效至生产產製造到存民國国"
          # lot-code symbols after the date ("2028年02月+AJ"); without them "+" was read as 中 / 初,
          # which parses as a dekad (中旬) and moves the expiry 9-19 days early
-         "+*#")
+         "+*#"
+         # Korean dekad marks: 상순 / 중순 / 하순 / 초순, 초 / 말 / 월말 / 말일
+         "상하초중순말")
 VOCAB = ["<b>"] + list(CHARS)
 C2I = {c: i for i, c in enumerate(VOCAB)}
 import os
@@ -101,6 +103,8 @@ LABEL_ONLY = ["賞味期限", "消費期限", "賞味期限:", "消費期限:", 
 
 
 ML_P = 0.3  # share of non-Japanese lines (Korean, Chinese, Taiwan, South-East Asia)
+# share of Korean lines given as a 10-day part (2026년 3월 하순). KIGEN_KODEKAD=1
+KODEKAD_P = 0.5 if os.environ.get("KIGEN_KODEKAD", "0") == "1" else 0.0
 
 # Dekad fine-tune (KIGEN_DEKAD=1): more 上旬/中旬/下旬/初/中/末 lines, digits leaning on the pairs
 # the model mixes up (0<->2: 07/27, 2020/2022), lines turned 0-90 deg, shrunk to a 640 px frame
@@ -126,7 +130,23 @@ def ml_text(lang=None):
     thai = ""
     # Taiwan and Thailand read worst in the per-country check: weighted up
     lang = lang or random.choices(["kr", "cn", "tw", "th", "vn", "id"], [4, 3, 2.5, 2.5, 1, 1])[0]
-    if lang == "kr":
+    kodekad = False
+    if lang == "kr" and random.random() < KODEKAD_P:
+        # 2026년 3월 하순 / 2026.03 상순 / 26년 3월말 / 2026.03 말: the same 10-day parts as 上旬 / 末
+        kodekad = True
+        part = random.choice(["상순", "중순", "하순", "초순", "초", "말", "월말", "말일"])
+        if random.random() < 0.5:  # confusable pairs side by side in training (초 <-> 하 / 말, 상 <-> 하)
+            part = random.choice({"상순": ["상순", "하순"], "하순": ["하순", "상순", "초순"], "초순": ["초순", "하순"],
+                                  "중순": ["중순", "상순", "하순"], "초": ["초", "말"], "말": ["말", "초"],
+                                  "월말": ["월말", "월초"], "말일": ["말일"]}[part])
+        f = random.random()
+        sp = random.choice(["", " "])
+        s = (f"{y}년 {pad(m, p)}월{sp}{part}" if f < 0.45 else f"{y}.{m:02d}{sp}{part}" if f < 0.75
+             else f"{yy}년 {m}월{sp}{part}" if f < 0.9 else f"{y}-{m:02d} {part}")
+        if random.random() < 0.3:
+            s += random.choice(["까지", " 까지"])
+        pre = random.choices(["소비기한 ", "소비기한:", "유통기한 ", "품질유지기한 ", ""], [5, 2, 2, 1, 3])[0]
+    elif lang == "kr":
         # 소비기한 is the norm since 2024 (유통기한 on older / imported stock): "소비기한 2026.03.31까지"
         f = random.random()
         s = (f"{y}.{m:02d}.{d:02d}" if f < 0.4 else f"{y}. {m}. {d}." if f < 0.5 else f"{y}.{m:02d}.{d:02d}." if f < 0.55
@@ -181,6 +201,8 @@ def ml_text(lang=None):
     if len(t) > 26:
         t = " ".join((s + lot).split()) if len(s + lot) <= 26 else s
     vis = visual_variant(t)
+    if kodekad and random.random() < 0.35:  # full-width digits / letters with U+3000 spaces
+        vis = "".join(FW.get(c, c) if c != " " else "　" for c in t)
     if thai:
         vis = thai + random.choice([" ", ": ", " "]) + vis
     return vis, norm_label(t)

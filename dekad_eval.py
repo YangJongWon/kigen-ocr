@@ -101,8 +101,9 @@ def main():
     a = ap.parse_args()
     sets = {m: lines(a.n, m, 41 + i) for i, m in enumerate(("plain", "rot", "small", "blur", "clip", "conf"))}
     for ck in a.ckpts:
-        m = train.Net()
-        m.load_state_dict(torch.load(ck, map_location="cpu"))
+        sd = torch.load(ck, map_location="cpu")  # (older checkpoints: fewer output characters, same order)
+        m = train.Net(n=sd["fc.weight"].shape[0])
+        m.load_state_dict(sd)
         m.eval()
         res, cnt, shown = [], {}, 0
         for name, data in sets.items():
